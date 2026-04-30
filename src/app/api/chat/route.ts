@@ -37,7 +37,9 @@ type StructuredResponse = {
 
 const PRIMARY_MODEL = process.env.OPENAI_MODEL_PRIMARY ?? process.env.OPENAI_MODEL ?? "gpt-5-mini";
 const FALLBACK_MODEL = process.env.OPENAI_MODEL_FALLBACK ?? "gpt-5-nano";
-const MODEL_CANDIDATES = [...new Set([PRIMARY_MODEL, FALLBACK_MODEL].filter(Boolean))];
+const MODEL_CANDIDATES = [PRIMARY_MODEL, FALLBACK_MODEL].filter(
+  (model, index, models): model is string => Boolean(model) && models.indexOf(model) === index
+);
 const MAX_ASSISTANT_TOKENS = 220;
 const DEMO_SESSION_MAX_USER_MESSAGES = 10;
 
@@ -200,7 +202,7 @@ function normalizeCacheKey(input: string) {
   return input.toLowerCase().replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
 }
 
-function getCachedAnswer(messages: IncomingMessage[]) {
+function getCachedAnswer(messages: IncomingMessage[]): string | null {
   const lastUserMessage = [...messages].reverse().find((message) => message.role === "user");
 
   if (!lastUserMessage) {
@@ -208,14 +210,15 @@ function getCachedAnswer(messages: IncomingMessage[]) {
   }
 
   const normalized = normalizeCacheKey(lastUserMessage.content);
+  let cachedAnswer: string | null = null;
 
-  for (const [key, answer] of CACHED_ANSWERS.entries()) {
-    if (normalized.includes(key)) {
-      return answer;
+  CACHED_ANSWERS.forEach((answer, key) => {
+    if (!cachedAnswer && normalized.includes(key)) {
+      cachedAnswer = answer;
     }
-  }
+  });
 
-  return null;
+  return cachedAnswer;
 }
 
 function isFunctionToolCall(

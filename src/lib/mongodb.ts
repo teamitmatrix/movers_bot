@@ -5,16 +5,16 @@ type MongooseCache = {
   promise: Promise<typeof mongoose> | null;
 };
 
-declare global {
-  let mongooseCache: MongooseCache | undefined;
-}
+const globalForMongoose = globalThis as typeof globalThis & {
+  mongooseCache?: MongooseCache;
+};
 
-const globalCache = globalThis.mongooseCache ?? {
+const globalCache = globalForMongoose.mongooseCache ?? {
   conn: null,
   promise: null,
 };
 
-globalThis.mongooseCache = globalCache;
+globalForMongoose.mongooseCache = globalCache;
 
 export async function connectToDatabase() {
   const mongodbUri = process.env.MONGODB_URI;
