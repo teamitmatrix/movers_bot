@@ -8,7 +8,7 @@ import { connectToDatabase } from "@/lib/mongodb";
 import { authOptions } from "@/lib/auth";
 import { calculateMovePrice, type PricingResult } from "@/lib/pricing";
 import type { OrderDocument, OrderStatus } from "@/models/Order";
-import Order from "@/models/Order";
+import Order, { formatOrderId } from "@/models/Order";
 
 const logger = makeLogger("/api/orders/[id]");
 
@@ -29,6 +29,8 @@ function serializeOrder(order: OrderDocument & { _id: { toString(): string } }) 
 
   return {
     id: order._id.toString(),
+    displayId: order.orderNumber ? formatOrderId(order.orderNumber) : order._id.toString(),
+    orderNumber: order.orderNumber ?? null,
     pickup: order.pickup,
     dropoff: order.dropoff,
     items: order.items,

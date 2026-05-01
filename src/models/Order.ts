@@ -23,6 +23,7 @@ export interface CustomerInfo {
 }
 
 export interface OrderDocument {
+  orderNumber: number;
   pickup: LocationDetails;
   dropoff: LocationDetails;
   items: OrderItem[];
@@ -102,6 +103,10 @@ const customerSchema = new Schema<CustomerInfo>(
 
 const orderSchema = new Schema<OrderDocument>(
   {
+    orderNumber: {
+      type: Number,
+      unique: true,
+    },
     pickup: {
       type: locationSchema,
       required: true,
@@ -139,5 +144,18 @@ const orderSchema = new Schema<OrderDocument>(
 );
 
 const Order = (models.Order as Model<OrderDocument>) || model<OrderDocument>("Order", orderSchema);
+
+/** Atomically assign the next order number (OID starts at 101). */
+export async function assignOrderNumber(doc: InstanceType<typeof Order>): Promise<void> {
+  if (doc.orderNumber) return; // already set
+  const count = await Order.countDocuments();
+  // Use count + 101 so the first order is OID-101 even before save increments the count
+  doc.orderNumber = count + 101;
+}
+
+/** Format an order number as the human-readable ID, e.g. "OID-101". */
+export function formatOrderId(orderNumber: number): string {
+  return `OID-${orderNumber}`;
+}
 
 export default Order;

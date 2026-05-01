@@ -49,6 +49,7 @@ type OrderStatus = "pending" | "confirmed" | "completed";
 type OrderResponse = {
   order: {
     id: string;
+    displayId?: string | null;
     pickup: {
       address?: string;
       city?: string;
@@ -234,7 +235,10 @@ export default function OrderDetailsView({ id }: { id: string }) {
             <p className="text-sm font-medium uppercase tracking-[0.3em] text-blue-100/90">
               Order Details
             </p>
-            <h1 className="mt-3 text-3xl font-bold tracking-tight sm:text-4xl">
+            <p className="mt-1 text-base font-mono font-semibold tracking-widest text-blue-300">
+              {order.displayId ?? order.id}
+            </p>
+            <h1 className="mt-2 text-3xl font-bold tracking-tight sm:text-4xl">
               {order.customer.name}
             </h1>
             <p className="mt-3 text-sm leading-6 text-blue-100/85 sm:text-base">

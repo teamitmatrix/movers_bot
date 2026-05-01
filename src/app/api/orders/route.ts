@@ -12,6 +12,7 @@ import Order, {
   type OrderDocument,
   type OrderItem,
   type OrderStatus,
+  formatOrderId,
 } from "@/models/Order";
 
 const logger = makeLogger("/api/orders");
@@ -39,6 +40,8 @@ const VALID_STATUSES: OrderStatus[] = ["pending", "confirmed", "completed"];
 function serializeOrder(order: OrderDocument & { _id: { toString(): string } }) {
   return {
     id: order._id.toString(),
+    displayId: order.orderNumber ? formatOrderId(order.orderNumber) : order._id.toString(),
+    orderNumber: order.orderNumber ?? null,
     pickup: order.pickup,
     dropoff: order.dropoff,
     items: order.items,

@@ -55,6 +55,7 @@ function MapPinIcon() {
 
 type DashboardOrder = {
   id: string;
+  displayId?: string | null;
   pickup: {
     city?: string;
     state?: string;
@@ -331,6 +332,7 @@ export default function OrdersDashboard() {
 
                 <div className="flex items-start justify-between gap-3">
                   <div>
+                    <p className="text-[11px] font-semibold uppercase tracking-[0.15em] text-slate-400">{order.displayId ?? order.id.slice(-8).toUpperCase()}</p>
                     <p className="text-lg font-semibold text-slate-900">{order.customer.name}</p>
                     <p className="mt-1 text-sm text-slate-600">Booked {formatDate(order.createdAt)}</p>
                   </div>
@@ -395,6 +397,7 @@ export default function OrdersDashboard() {
             <table className="min-w-full divide-y divide-slate-200 text-left text-sm">
               <thead className="bg-slate-50 text-slate-600">
                 <tr>
+                  <th className="px-5 py-4 font-semibold">Order ID</th>
                   <th className="px-5 py-4 font-semibold">Customer</th>
                   <th className="px-5 py-4 font-semibold">Route</th>
                   <th className="px-5 py-4 font-semibold">Price</th>
@@ -405,7 +408,7 @@ export default function OrdersDashboard() {
               <tbody className="divide-y divide-slate-200 bg-white text-slate-700">
                 {visibleOrders.length === 0 ? (
                   <tr>
-                    <td colSpan={5} className="px-5 py-10 text-center text-slate-500">
+                    <td colSpan={6} className="px-5 py-10 text-center text-slate-500">
                       No orders found.
                     </td>
                   </tr>
@@ -417,6 +420,7 @@ export default function OrdersDashboard() {
                     onClick={() => router.push(`/dashboard/orders/${order.id}`)}
                     className="cursor-pointer transition hover:bg-slate-50"
                   >
+                    <td className="px-5 py-5 font-mono text-sm font-semibold text-slate-700">{order.displayId ?? order.id.slice(-8).toUpperCase()}</td>
                     <td className="px-5 py-5 font-medium text-slate-900">{order.customer.name}</td>
                     <td className="px-5 py-5">
                       {formatLocation(order.pickup)} {"->"} {formatLocation(order.dropoff)}

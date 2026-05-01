@@ -6,7 +6,8 @@ import { makeLogger } from "@/lib/logger";
 import { connectToDatabase } from "@/lib/mongodb";
 import { calculateMovePrice, type PricingItem, type PricingResult } from "@/lib/pricing";
 import { checkRateLimit, getClientIp } from "@/lib/rateLimit";
-import Order from "@/models/Order";
+import type { PartialBookingData } from "@/models/Conversation";
+import Order, { assignOrderNumber, formatOrderId } from "@/models/Order";
 import Conversation from "@/models/Conversation";
 
 type IncomingMessage = {
@@ -51,22 +52,86 @@ const CACHED_ANSWERS = new Map<string, string>([
   ["how fast can i get a quote", "Usually in under 60 seconds. Please share pickup ZIP, dropoff ZIP, and the items you are moving."],
 ]);
 
-const SYSTEM_PROMPT = [
-  "You are Vanturo's moving service booking assistant.",
-  "Collect only the details needed for a moving quote and booking.",
-  "Required quote fields are pickup ZIP, dropoff ZIP, and items with type and quantity.",
-  "Required booking fields are pickup ZIP, dropoff ZIP, items, customer name, and customer phone.",
-  "Ask one concise follow-up question when required fields are missing.",
-  "Keep replies short, form-like, and action-oriented.",
-  "Prefer prompts like 'What items are you moving?' and 'Pick date/time'.",
-  "Avoid long explanations and unnecessary detail.",
-  "Keep each reply roughly within 100 to 300 tokens.",
-  "Demo mode allows at most 10 user messages per session.",
-  "Use calculate_price only when quote fields are complete.",
-  "Use create_order only after the user clearly confirms they want to book.",
-  "Never invent missing values and never calculate pricing yourself.",
-].join(" ");
+function buildSystemPrompt(quoteAlreadyGiven: boolean): string {
+  const base = [
+    "You are a friendly, conversational AI assistant for Vanturo moving service.",
+    "You behave like a real human agent, not a form bot.",
+    "You can chat naturally, help with booking, and answer questions.",
+    "Keep replies concise (50–150 tokens), clear, and natural.",
+    "Respond to greetings, thanks, and casual messages warmly (e.g., 'You're welcome!', 'Happy to help!').",
+    "Do NOT repeat previous messages unless explicitly asked.",
+    "Do NOT force booking flow if the user is chatting casually.",
+    "Do NOT ask for name, phone, or email — a form handles that after the quote.",
+    "Never invent values and never calculate pricing yourself.",
+  ];
 
+  if (quoteAlreadyGiven) {
+    return [
+      ...base,
+      "A price quote has already been provided in this conversation.",
+      "You are now in POST-QUOTE mode.",
+      
+      "Rules for this mode:",
+      "- Do NOT call calculate_price again.",
+      "- Do NOT repeat the quote unless the user explicitly asks for it.",
+      "- If user says thanks → respond naturally (do NOT mention quote again).",
+      "- If user asks a question → answer helpfully like a human agent.",
+      "- If user wants to proceed → guide them to complete the form.",
+      "- If user asks about their move → refer to known details without repeating full quote unnecessarily.",
+
+      "Always prioritize natural conversation over repeating booking steps.",
+    ].join(" ");
+  }
+
+  return [
+    ...base,
+    "You are in PRE-QUOTE mode.",
+
+    "Your goal is to collect:",
+    "- pickup ZIP",
+    "- dropoff ZIP",
+    "- items (type + quantity)",
+
+    "Rules:",
+    "- Ask ONLY one question at a time.",
+    "- If user is chatting casually → respond normally, do NOT force booking.",
+    "- Once all required info is collected → call calculate_price.",
+    "- After providing a quote, say exactly:",
+    "  'To confirm your booking, please fill in the form below.'",
+    "- Then switch naturally to conversation mode if user continues chatting.",
+  ].join(" ");
+}
+
+function buildSupportSystemPrompt(partial: PartialBookingData, orderId: string): string {
+  const itemSummary =
+    partial.items?.map((i) => `${i.quantity}x ${i.type}`).join(", ") ?? "unknown items";
+
+  return [
+    "You are a friendly human-like support agent for Vanturo moving service.",
+    "The user has already placed an order.",
+
+    `Order ID: ${orderId}.`,
+    `Route: ${partial.pickupZip ?? "?"} → ${partial.dropoffZip ?? "?"}.`,
+    `Items: ${itemSummary}.`,
+
+    "Your role:",
+    "- Answer questions about the order",
+    "- Provide status updates",
+    "- Help with changes (date, items, etc.)",
+    "- Reassure the customer",
+
+    "Behavior rules:",
+    "- Be conversational and natural",
+    "- If user says thanks → respond politely (e.g., 'You're welcome!')",
+    "- If user asks for order details → summarize clearly",
+    "- Do NOT repeat all details unless needed",
+    "- Do NOT call tools",
+    "- Do NOT create new orders",
+    "- Do NOT calculate pricing",
+
+    "Keep responses concise (60–180 tokens).",
+  ].join(" ");
+}
 const TOOLS = [
   {
     type: "function",
@@ -361,19 +426,15 @@ function mergeBookingDetails(primary: BookingDetails | null, secondary: BookingD
 }
 
 function inferBookingDetailsFromMessages(messages: IncomingMessage[]): BookingDetails {
-  const lastUserMessage = [...messages].reverse().find((message) => message.role === "user");
+  // Scan ALL user messages so data from earlier turns isn't lost
+  const userMessages = messages.filter((m) => m.role === "user");
+  if (!userMessages.length) return { items: [] };
 
-  if (!lastUserMessage) {
-    return { items: [] };
-  }
-
-  const zipMatches = lastUserMessage.content.match(/\b\d{5}\b/g) ?? [];
+  const fullHistory = userMessages.map((m) => m.content).join("\n");
+  const zipMatches = fullHistory.match(/\b\d{5}\b/g) ?? [];
   const itemMatches = Array.from(
-    lastUserMessage.content.matchAll(/\b(\d+)\s*(bed|sofa|wardrobe|appliance|boxes|piano)s?\b/gi)
+    fullHistory.matchAll(/\b(\d+)\s*(bed|sofa|wardrobe|appliance|boxes|piano)s?\b/gi)
   );
-  const phoneMatch = lastUserMessage.content.match(US_PHONE_RE);
-  const emailMatch = lastUserMessage.content.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
-  const nameMatch = lastUserMessage.content.match(/name\s*[:\-]\s*([a-z ,.'-]{2,})/i);
 
   return {
     pickupZip: zipMatches[0],
@@ -382,41 +443,34 @@ function inferBookingDetailsFromMessages(messages: IncomingMessage[]): BookingDe
       type: match[2].toLowerCase() as PricingItem["type"],
       quantity: Number.parseInt(match[1], 10),
     })),
-    customerName: nameMatch?.[1]?.trim(),
-    customerPhone: phoneMatch?.[0],
-    customerEmail: emailMatch?.[0],
   };
 }
 
-function buildFallbackAssistantMessage(details: BookingDetails, structuredData: StructuredResponse): string {
+function buildFallbackAssistantMessage(details: BookingDetails, structuredData: StructuredResponse, quoteAlreadyGiven = false): string {
   if (structuredData.order) {
-    return `Booking confirmed. Your move total is $${structuredData.order.totalPrice.toFixed(2)} and your order ID is ${structuredData.order.id}.`;
+    return `Booking confirmed. Order ${structuredData.order.id} — Total: ${structuredData.order.totalPrice.toLocaleString("en-US", { style: "currency", currency: "USD" })}.`;
   }
 
-  if (structuredData.priceQuote && details.pickupZip && details.dropoffZip && details.items.length > 0) {
-    const itemSummary = details.items
-      .map((item) => `${item.quantity} ${item.type}`)
-      .join(", ");
-
-    return `Estimated total: ${structuredData.priceQuote.totalPrice.toLocaleString("en-US", { style: "currency", currency: "USD" })} for ${details.pickupZip} to ${details.dropoffZip} with ${itemSummary}. If you want to book, send your name and phone number.`;
+  if (structuredData.priceQuote) {
+    // If quote was already in the session before this turn, just nudge — don't repeat the whole quote
+    if (quoteAlreadyGiven) {
+      return "Please fill in the contact form above to confirm your booking.";
+    }
+    const itemSummary = details.items.map((item) => `${item.quantity}x ${item.type}`).join(", ");
+    const total = structuredData.priceQuote.totalPrice.toLocaleString("en-US", { style: "currency", currency: "USD" });
+    return `Quote ready — ${total}\nPickup: ${details.pickupZip} → Dropoff: ${details.dropoffZip}\nItems: ${itemSummary}\n\nTo confirm your booking, please fill in the form below.`;
   }
 
   const missingQuoteFields = getMissingQuoteFields(details);
 
   if (missingQuoteFields.length > 0) {
     if (missingQuoteFields.includes("items")) {
-      return "What items are you moving? Please list the type and quantity, for example: 1 sofa, 10 boxes.";
+      return "What items are you moving? Example: 1 sofa, 2 beds, 10 boxes.";
     }
-
-    return "Tell me your pickup ZIP, dropoff ZIP, and what items you need moved so I can give you an instant quote.";
+    return "Please share your pickup ZIP, dropoff ZIP, and the items you need moved.";
   }
 
-  const missingOrderFields = getMissingOrderFields(details);
-  if (missingOrderFields.includes("customer_name") || missingOrderFields.includes("customer_phone")) {
-    return "I have your route and items. If you want to book, send your full name and phone number.";
-  }
-
-  return "I have your move details. If you want to continue, confirm the booking or share any missing information.";
+  return "Calculating your quote now\u2026";
 }
 
 function getMissingQuoteFields(details: BookingDetails) {
@@ -472,13 +526,9 @@ async function createOrder(details: BookingDetails) {
 
   await connectToDatabase();
 
-  const order = await Order.create({
-    pickup: {
-      zip: details.pickupZip,
-    },
-    dropoff: {
-      zip: details.dropoffZip,
-    },
+  const doc = new Order({
+    pickup: { zip: details.pickupZip },
+    dropoff: { zip: details.dropoffZip },
     items: details.items,
     customer: {
       name: details.customerName,
@@ -489,10 +539,13 @@ async function createOrder(details: BookingDetails) {
     status: "confirmed",
   });
 
+  await assignOrderNumber(doc);
+  await doc.save();
+
   return {
     order: {
-      id: String(order._id),
-      status: order.status,
+      id: formatOrderId(doc.orderNumber),
+      status: doc.status,
       totalPrice: priceQuote.totalPrice,
     },
     priceQuote,
@@ -503,6 +556,21 @@ function sessionExpiry() {
   const date = new Date();
   date.setHours(date.getHours() + 24);
   return date;
+}
+
+function cloneStoredBookingDetails(details: PartialBookingData | null | undefined): BookingDetails | null {
+  if (!details) {
+    return null;
+  }
+
+  return {
+    pickupZip: details.pickupZip,
+    dropoffZip: details.dropoffZip,
+    items: Array.isArray(details.items) ? [...details.items] : [],
+    customerName: details.customerName,
+    customerPhone: details.customerPhone,
+    customerEmail: details.customerEmail,
+  };
 }
 
 export async function POST(request: Request) {
@@ -520,7 +588,6 @@ export async function POST(request: Request) {
     const body = await request.json().catch(() => {
       throw new ApiError(400, "Request body must be valid JSON.");
     });
-    const messages = sanitizeMessages(body.messages);
 
     const rawSessionId = body.sessionId;
     if (rawSessionId !== undefined && (typeof rawSessionId !== "string" || !UUID_RE.test(rawSessionId))) {
@@ -529,6 +596,88 @@ export async function POST(request: Request) {
     const sessionId: string | undefined =
       typeof rawSessionId === "string" ? rawSessionId : undefined;
 
+    // ── Contact form submission path (bypasses AI entirely) ──────────────────
+    const rawContactForm = body.contactForm as Record<string, unknown> | null | undefined;
+    if (rawContactForm && typeof rawContactForm === "object") {
+      const name = typeof rawContactForm.name === "string" ? rawContactForm.name.trim() : "";
+      const phone = typeof rawContactForm.phone === "string" ? rawContactForm.phone.trim() : "";
+      const email = typeof rawContactForm.email === "string" && rawContactForm.email.trim()
+        ? rawContactForm.email.trim()
+        : undefined;
+
+      if (!name || name.length < 2) {
+        throw new ApiError(400, "Please provide a valid full name.");
+      }
+      if (!phone) {
+        throw new ApiError(400, "Please provide a phone number.");
+      }
+      if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        throw new ApiError(400, "Please provide a valid email address.");
+      }
+      if (!sessionId) {
+        throw new ApiError(400, "sessionId is required for contact form submission.");
+      }
+
+      await connectToDatabase();
+      const formSession = await Conversation.findOne({ sessionId });
+      if (!formSession) {
+        throw new ApiError(400, "Session not found. Please start a new chat.");
+      }
+      if (formSession.status === "booked") {
+        return NextResponse.json(
+          { error: "This conversation is already booked.", orderId: formSession.orderId ?? null },
+          { status: 409 }
+        );
+      }
+
+      const partial = formSession.partialData;
+      if (!partial?.pickupZip || !partial?.dropoffZip || !partial?.items?.length) {
+        throw new ApiError(
+          400,
+          "Move details not found. Please tell us your pickup ZIP, dropoff ZIP, and items first."
+        );
+      }
+
+      const bookingDetails: BookingDetails = {
+        pickupZip: partial.pickupZip,
+        dropoffZip: partial.dropoffZip,
+        items: partial.items,
+        customerName: name,
+        customerPhone: phone,
+        customerEmail: email,
+      };
+
+      const { order, priceQuote } = await createOrder(bookingDetails);
+
+      const formattedTotal = priceQuote.totalPrice.toLocaleString("en-US", {
+        style: "currency",
+        currency: "USD",
+      });
+      const confirmMsg = `Booking confirmed! ${order.id} — ${formattedTotal}\nRoute: ${partial.pickupZip} → ${partial.dropoffZip}\nWe'll be in touch at ${phone}.`;
+
+      formSession.partialData = {
+        ...(formSession.partialData ?? {}),
+        customerName: name,
+        customerPhone: phone,
+        customerEmail: email,
+      };
+      formSession.status = "booked";
+      formSession.orderId = order.id;
+      formSession.messages.push({ role: "assistant", content: confirmMsg, timestamp: new Date() });
+      formSession.expiresAt = sessionExpiry();
+      await formSession.save();
+
+      logger.info("Order created via contact form", { orderId: order.id, sessionId });
+
+      return NextResponse.json({
+        assistantMessage: confirmMsg,
+        structuredData: { details: bookingDetails, priceQuote, order },
+        sessionId: formSession.sessionId,
+      });
+    }
+    // ────────────────────────────────────────────────────────────────────────
+
+    const messages = sanitizeMessages(body.messages);
     const client = getClient();
 
     // Load persisted history for this session (if any)
@@ -540,7 +689,8 @@ export async function POST(request: Request) {
     const persistedUserMessageCount =
       dbSession?.messages.filter((message) => message.role === "user").length ?? 0;
 
-    if (dbSession && persistedUserMessageCount >= DEMO_SESSION_MAX_USER_MESSAGES) {
+    // Only enforce the demo cap on pre-booking turns
+    if (dbSession && dbSession.status !== "booked" && persistedUserMessageCount >= DEMO_SESSION_MAX_USER_MESSAGES) {
       logger.info("Demo session cap reached", {
         sessionId,
         persistedUserMessageCount,
@@ -562,15 +712,7 @@ export async function POST(request: Request) {
     }
 
     // Reject messages on sessions that have already been booked
-    if (dbSession?.status === "booked") {
-      return NextResponse.json(
-        {
-          error: "This conversation is already booked. Start a new chat to make another booking.",
-          orderId: dbSession.orderId ?? null,
-        },
-        { status: 409 }
-      );
-    }
+    // Allow post-booking support messages — switch to support system prompt below instead.
 
     logger.info("Chat request", { sessionId, messageCount: messages.length });
 
@@ -603,22 +745,58 @@ export async function POST(request: Request) {
       });
     }
 
+    // Pre-populate priceQuote from stored partial data so the UI knows a quote was already given
+    const storedDetails = cloneStoredBookingDetails(dbSession?.partialData ?? null);
+    const storedPriceQuote = (() => {
+      const pd = dbSession?.partialData;
+      if (
+        pd?.pickupZip &&
+        pd?.dropoffZip &&
+        pd?.items?.length &&
+        isValidUsZip(pd.pickupZip) &&
+        isValidUsZip(pd.dropoffZip) &&
+        !pd.items.some((item) => item.quantity > MAX_ITEM_QUANTITY)
+      ) {
+        try {
+          return calculateMovePrice({
+            pickup_zip: pd.pickupZip,
+            dropoff_zip: pd.dropoffZip,
+            items: pd.items,
+          });
+        } catch {
+          return null;
+        }
+      }
+      return null;
+    })();
+
+    const isBooked = dbSession?.status === "booked";
+    const quoteAlreadyGiven = !isBooked && Boolean(storedPriceQuote);
+    const activeSystemPrompt =
+      isBooked && dbSession?.orderId && dbSession?.partialData
+        ? buildSupportSystemPrompt(dbSession.partialData, dbSession.orderId)
+        : buildSystemPrompt(quoteAlreadyGiven);
+
     const conversation = [
-      { role: "system", content: SYSTEM_PROMPT },
+      { role: "system", content: activeSystemPrompt },
       ...messages,
     ] as Parameters<typeof client.chat.completions.create>[0]["messages"];
 
     const structuredData: StructuredResponse = {
-      details: null,
-      priceQuote: null,
+      details: storedDetails,
+      priceQuote: storedPriceQuote,
       order: null,
     };
 
     for (let step = 0; step < 5; step += 1) {
       const { completion, model } = await createChatCompletion(client, {
         messages: conversation as Parameters<typeof client.chat.completions.create>[0]["messages"],
-        tools: TOOLS as unknown as Parameters<typeof client.chat.completions.create>[0]["tools"],
-        tool_choice: "auto",
+        ...(isBooked
+          ? {}
+          : {
+              tools: TOOLS as unknown as Parameters<typeof client.chat.completions.create>[0]["tools"],
+              tool_choice: "auto" as const,
+            }),
       });
 
       logger.info("OpenAI completion created", { model, step: step + 1, sessionId });
@@ -653,7 +831,7 @@ export async function POST(request: Request) {
             });
           }
 
-          assistantText = buildFallbackAssistantMessage(mergedDetails, structuredData);
+          assistantText = buildFallbackAssistantMessage(mergedDetails, structuredData, quoteAlreadyGiven);
           logger.warn("Empty assistant response replaced with fallback", {
             sessionId,
             inferredQuote: Boolean(structuredData.priceQuote),
