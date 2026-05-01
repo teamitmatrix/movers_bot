@@ -349,6 +349,76 @@ function normalizeBookingDetails(args: Record<string, unknown>): BookingDetails 
   };
 }
 
+function mergeBookingDetails(primary: BookingDetails | null, secondary: BookingDetails): BookingDetails {
+  return {
+    pickupZip: primary?.pickupZip ?? secondary.pickupZip,
+    dropoffZip: primary?.dropoffZip ?? secondary.dropoffZip,
+    items: primary && primary.items.length > 0 ? primary.items : secondary.items,
+    customerName: primary?.customerName ?? secondary.customerName,
+    customerPhone: primary?.customerPhone ?? secondary.customerPhone,
+    customerEmail: primary?.customerEmail ?? secondary.customerEmail,
+  };
+}
+
+function inferBookingDetailsFromMessages(messages: IncomingMessage[]): BookingDetails {
+  const lastUserMessage = [...messages].reverse().find((message) => message.role === "user");
+
+  if (!lastUserMessage) {
+    return { items: [] };
+  }
+
+  const zipMatches = lastUserMessage.content.match(/\b\d{5}\b/g) ?? [];
+  const itemMatches = Array.from(
+    lastUserMessage.content.matchAll(/\b(\d+)\s*(bed|sofa|wardrobe|appliance|boxes|piano)s?\b/gi)
+  );
+  const phoneMatch = lastUserMessage.content.match(US_PHONE_RE);
+  const emailMatch = lastUserMessage.content.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
+  const nameMatch = lastUserMessage.content.match(/name\s*[:\-]\s*([a-z ,.'-]{2,})/i);
+
+  return {
+    pickupZip: zipMatches[0],
+    dropoffZip: zipMatches[1],
+    items: itemMatches.map((match) => ({
+      type: match[2].toLowerCase() as PricingItem["type"],
+      quantity: Number.parseInt(match[1], 10),
+    })),
+    customerName: nameMatch?.[1]?.trim(),
+    customerPhone: phoneMatch?.[0],
+    customerEmail: emailMatch?.[0],
+  };
+}
+
+function buildFallbackAssistantMessage(details: BookingDetails, structuredData: StructuredResponse): string {
+  if (structuredData.order) {
+    return `Booking confirmed. Your move total is $${structuredData.order.totalPrice.toFixed(2)} and your order ID is ${structuredData.order.id}.`;
+  }
+
+  if (structuredData.priceQuote && details.pickupZip && details.dropoffZip && details.items.length > 0) {
+    const itemSummary = details.items
+      .map((item) => `${item.quantity} ${item.type}`)
+      .join(", ");
+
+    return `Estimated total: ${structuredData.priceQuote.totalPrice.toLocaleString("en-US", { style: "currency", currency: "USD" })} for ${details.pickupZip} to ${details.dropoffZip} with ${itemSummary}. If you want to book, send your name and phone number.`;
+  }
+
+  const missingQuoteFields = getMissingQuoteFields(details);
+
+  if (missingQuoteFields.length > 0) {
+    if (missingQuoteFields.includes("items")) {
+      return "What items are you moving? Please list the type and quantity, for example: 1 sofa, 10 boxes.";
+    }
+
+    return "Tell me your pickup ZIP, dropoff ZIP, and what items you need moved so I can give you an instant quote.";
+  }
+
+  const missingOrderFields = getMissingOrderFields(details);
+  if (missingOrderFields.includes("customer_name") || missingOrderFields.includes("customer_phone")) {
+    return "I have your route and items. If you want to book, send your full name and phone number.";
+  }
+
+  return "I have your move details. If you want to continue, confirm the booking or share any missing information.";
+}
+
 function getMissingQuoteFields(details: BookingDetails) {
   const missingFields: string[] = [];
 
@@ -560,7 +630,36 @@ export async function POST(request: Request) {
       }
 
       if (!assistantMessage.tool_calls || assistantMessage.tool_calls.length === 0) {
-        const assistantText = assistantMessage.content ?? "";
+        let assistantText = assistantMessage.content?.trim() ?? "";
+
+        if (!assistantText) {
+          const inferredDetails = inferBookingDetailsFromMessages(messages);
+          const mergedDetails = mergeBookingDetails(structuredData.details, inferredDetails);
+
+          structuredData.details = mergedDetails;
+
+          const missingQuoteFields = getMissingQuoteFields(mergedDetails);
+          if (
+            !structuredData.priceQuote &&
+            missingQuoteFields.length === 0 &&
+            isValidUsZip(mergedDetails.pickupZip ?? "") &&
+            isValidUsZip(mergedDetails.dropoffZip ?? "") &&
+            !mergedDetails.items.some((item) => item.quantity > MAX_ITEM_QUANTITY)
+          ) {
+            structuredData.priceQuote = calculateMovePrice({
+              pickup_zip: mergedDetails.pickupZip ?? "",
+              dropoff_zip: mergedDetails.dropoffZip ?? "",
+              items: mergedDetails.items,
+            });
+          }
+
+          assistantText = buildFallbackAssistantMessage(mergedDetails, structuredData);
+          logger.warn("Empty assistant response replaced with fallback", {
+            sessionId,
+            inferredQuote: Boolean(structuredData.priceQuote),
+            inferredItems: mergedDetails.items.length,
+          });
+        }
 
         // Persist the new user+assistant turn into MongoDB
         if (dbSession) {
