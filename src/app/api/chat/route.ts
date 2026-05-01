@@ -182,7 +182,7 @@ async function createChatCompletion(
       const completion = (await client.chat.completions.create({
         ...input,
         model,
-        max_tokens: MAX_ASSISTANT_TOKENS,
+        max_completion_tokens: MAX_ASSISTANT_TOKENS,
       })) as OpenAI.Chat.Completions.ChatCompletion;
 
       return { completion, model };
