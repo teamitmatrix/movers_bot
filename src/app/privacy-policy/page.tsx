@@ -32,7 +32,7 @@ const sections = [
   {
     heading: "Contact",
     body: [
-      "For privacy questions, contact Vanturo at support@vanturo.com or call 1-800-123-4567.",
+      "For privacy questions, contact Vanturo at hello@vanturo.com or call (555) 100-2000.",
     ],
   },
 ];

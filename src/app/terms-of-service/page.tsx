@@ -31,7 +31,7 @@ const sections = [
   {
     heading: "Contact",
     body: [
-      "Questions about these terms can be sent to support@vanturo.com or discussed by phone at 1-800-123-4567.",
+      "Questions about these terms can be sent to hello@vanturo.com or discussed by phone at (555) 100-2000.",
     ],
   },
 ];

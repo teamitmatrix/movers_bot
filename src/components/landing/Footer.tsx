@@ -38,13 +38,9 @@ export default function Footer() {
               USDOT licensed &bull; vanturo.com
             </p>
             <p className="mt-4 flex flex-col gap-1 text-sm text-slate-300 sm:block">
-              <a href="tel:+18001234567" className="hover:text-white">
-                1-800-123-4567
-              </a>
+              <span>(555) 100-2000</span>
               <span className="hidden sm:inline"> {"·"} </span>
-              <a href="mailto:support@vanturo.com" className="hover:text-white break-all">
-                support@vanturo.com
-              </a>
+              <span className="break-all">hello@vanturo.com</span>
             </p>
           </div>
 
@@ -83,7 +79,10 @@ export default function Footer() {
         </div>
 
         <div className="mt-12 border-t border-white/10 pt-6 text-center text-xs text-slate-400">
-          &copy; {year} Vanturo LLC. All rights reserved. USDOT #1234567
+          <p>&copy; {year} Vanturo LLC. All rights reserved. USDOT #2089147</p>
+          <p className="mt-2 italic text-slate-500">
+            Vanturo is a demo brand used for product demonstration purposes only.
+          </p>
         </div>
       </div>
     </footer>

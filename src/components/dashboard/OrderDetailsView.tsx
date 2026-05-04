@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import AdminSignOutButton from "@/components/dashboard/AdminSignOutButton";
+import { SERVICE_ADDONS, type ServiceAddOnId } from "@/lib/bookingPricing";
 
 function RouteIcon() {
   return (
@@ -44,7 +45,7 @@ function CalendarIcon() {
   );
 }
 
-type OrderStatus = "pending" | "confirmed" | "completed";
+type OrderStatus = "pending" | "confirmed" | "completed" | "lead-follow-up";
 
 type OrderResponse = {
   order: {
@@ -67,11 +68,17 @@ type OrderResponse = {
       quantity: number;
     }>;
     price: number;
+    selectedAddOns?: ServiceAddOnId[];
+    originalPrice?: number | null;
+    discountApplied?: boolean;
+    discountAmount?: number;
     customer: {
       name: string;
       phone: string;
       email?: string;
     };
+    moveDate?: string | null;
+    inventorySize?: string | null;
     status: OrderStatus;
     priceBreakdown: {
       distance: number;
@@ -93,6 +100,16 @@ type OrderResponse = {
     createdAt: string;
   };
 };
+
+function formatStatusLabel(status: OrderStatus) {
+  return status === "lead-follow-up" ? "Lead Follow Up" : status;
+}
+
+function formatSelectedAddOns(addOns: ServiceAddOnId[] = []) {
+  return SERVICE_ADDONS.filter((addOn) => addOns.includes(addOn.id))
+    .map((addOn) => addOn.shortLabel)
+    .join(", ");
+}
 
 function formatLocation(location: OrderResponse["order"]["pickup"]) {
   const details = [location.address, location.city, location.state].filter(Boolean);
@@ -122,9 +139,10 @@ const statusStyles: Record<OrderStatus, string> = {
   pending: "bg-amber-50 text-amber-700 ring-amber-200",
   confirmed: "bg-emerald-50 text-emerald-700 ring-emerald-200",
   completed: "bg-sky-50 text-sky-700 ring-sky-200",
+  "lead-follow-up": "bg-violet-50 text-violet-700 ring-violet-200",
 };
 
-const timelineSteps: Array<{ key: OrderStatus; label: string; description: string }> = [
+const standardTimelineSteps: Array<{ key: OrderStatus; label: string; description: string }> = [
   {
     key: "pending",
     label: "Pending intake",
@@ -134,6 +152,24 @@ const timelineSteps: Array<{ key: OrderStatus; label: string; description: strin
     key: "confirmed",
     label: "Confirmed for dispatch",
     description: "Crew assignment and move coordination are active.",
+  },
+  {
+    key: "completed",
+    label: "Completed delivery",
+    description: "Move has been finalized and recorded successfully.",
+  },
+];
+
+const leadTimelineSteps: Array<{ key: OrderStatus; label: string; description: string }> = [
+  {
+    key: "lead-follow-up",
+    label: "Lead follow up",
+    description: "Customer asked to be contacted later before confirming the move.",
+  },
+  {
+    key: "confirmed",
+    label: "Confirmed for dispatch",
+    description: "Lead converted and move coordination is active.",
   },
   {
     key: "completed",
@@ -225,6 +261,7 @@ export default function OrderDetailsView({ id }: { id: string }) {
     return <p className="py-8 text-sm text-slate-500">Order not found.</p>;
   }
 
+  const timelineSteps = status === "lead-follow-up" ? leadTimelineSteps : standardTimelineSteps;
   const currentStatusIndex = timelineSteps.findIndex((step) => step.key === status);
 
   return (
@@ -253,7 +290,7 @@ export default function OrderDetailsView({ id }: { id: string }) {
                 statusStyles[status],
               ].join(" ")}
             >
-              {status}
+              {formatStatusLabel(status)}
             </span>
             <AdminSignOutButton className="border border-white/20 bg-white/10 text-white hover:bg-white/15" />
             <Link
@@ -293,8 +330,8 @@ export default function OrderDetailsView({ id }: { id: string }) {
             <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-white/15 text-white/90">
               <CalendarIcon />
             </div>
-            <p className="text-xs font-semibold uppercase tracking-[0.18em] text-blue-100/80">Created</p>
-            <p className="mt-2 text-sm leading-6 text-white/90">{formatDate(order.createdAt)}</p>
+            <p className="text-xs font-semibold uppercase tracking-[0.18em] text-blue-100/80">Move date</p>
+            <p className="mt-2 text-sm leading-6 text-white/90">{order.moveDate ?? "Not set"}</p>
           </div>
         </div>
       </div>
@@ -392,6 +429,19 @@ export default function OrderDetailsView({ id }: { id: string }) {
                 <p>Name: {order.customer.name}</p>
                 <p>Phone: {order.customer.phone}</p>
                 <p>Email: {order.customer.email ?? "Not provided"}</p>
+                <p>Order ID: {order.displayId ?? order.id}</p>
+                <p>Status: {formatStatusLabel(order.status)}</p>
+              </div>
+            </div>
+
+            <div className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-200/80">
+              <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Move planning</p>
+              <div className="mt-3 space-y-2 text-sm leading-6 text-slate-700">
+                <p>Date: {order.moveDate ?? "Not set"}</p>
+                <p>Home size: {order.inventorySize ?? "Not set"}</p>
+                <p>Add-ons: {order.selectedAddOns?.length ? formatSelectedAddOns(order.selectedAddOns) : "None selected"}</p>
+                <p>Discount: {order.discountApplied ? `Applied (${formatCurrency(order.discountAmount ?? 0)})` : "Not applied"}</p>
+                <p>Created: {formatDate(order.createdAt)}</p>
               </div>
             </div>
 
@@ -407,6 +457,7 @@ export default function OrderDetailsView({ id }: { id: string }) {
                   <option value="pending">Pending</option>
                   <option value="confirmed">Confirmed</option>
                   <option value="completed">Completed</option>
+                  <option value="lead-follow-up">Lead Follow Up</option>
                 </select>
                 {error ? <p className="text-sm text-red-600">{error}</p> : null}
               </div>
@@ -481,6 +532,29 @@ export default function OrderDetailsView({ id }: { id: string }) {
                 <p className="mt-2 text-2xl font-bold tracking-tight text-slate-900">
                   {formatCurrency(order.price)}
                 </p>
+                <p className="mt-1 text-sm text-slate-500">
+                  {order.selectedAddOns?.length ? formatSelectedAddOns(order.selectedAddOns) : "Base move only"}
+                </p>
+              </div>
+            </div>
+
+            <div className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-200/80 sm:p-5">
+              <div className="flex flex-col gap-3 border-b border-slate-200 pb-4 sm:flex-row sm:items-center sm:justify-between">
+                <p className="text-sm font-semibold text-slate-900">Adjustments</p>
+                <div className="flex flex-wrap gap-2 text-xs text-slate-500">
+                  <span className="rounded-full bg-slate-100 px-3 py-1">
+                    Original {formatCurrency(order.originalPrice ?? order.priceBreakdown.totalPrice)}
+                  </span>
+                  <span className="rounded-full bg-slate-100 px-3 py-1">
+                    Discount {formatCurrency(order.discountAmount ?? 0)}
+                  </span>
+                </div>
+              </div>
+
+              <div className="mt-4 space-y-3 text-sm text-slate-700">
+                <p>Add-ons: {order.selectedAddOns?.length ? formatSelectedAddOns(order.selectedAddOns) : "None selected"}</p>
+                <p>Discount applied: {order.discountApplied ? "Yes" : "No"}</p>
+                <p>Final booked total: {formatCurrency(order.price)}</p>
               </div>
             </div>
 

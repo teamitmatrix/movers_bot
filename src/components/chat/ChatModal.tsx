@@ -4,13 +4,17 @@ import { useEffect, useRef, useState } from "react";
 
 import ChatUI from "@/components/chat/ChatUI";
 
+const CHAT_AUTO_OPEN_KEY = "vanturo-chat-auto-opened";
+
 export default function ChatWidget() {
   const [open, setOpen] = useState(false);
   const [footerVisible, setFooterVisible] = useState(false);
   const [dragOffset, setDragOffset] = useState(0);
   const [isDragging, setIsDragging] = useState(false);
+  const [showToggleNudge, setShowToggleNudge] = useState(false);
   const dragStartYRef = useRef<number | null>(null);
   const dragOffsetRef = useRef(0);
+  const hasShownNudgeRef = useRef(false);
 
   function isMobileViewport() {
     return typeof window !== "undefined" && window.innerWidth < 640;
@@ -95,6 +99,53 @@ export default function ChatWidget() {
       document.removeEventListener("keydown", handleKey);
     };
   }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return undefined;
+    }
+
+    if (isMobileViewport()) {
+      return undefined;
+    }
+
+    if (window.localStorage.getItem(CHAT_AUTO_OPEN_KEY) === "true") {
+      return undefined;
+    }
+
+    const timer = window.setTimeout(() => {
+      setOpen(true);
+      window.localStorage.setItem(CHAT_AUTO_OPEN_KEY, "true");
+    }, 3000);
+
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (open || typeof window === "undefined" || hasShownNudgeRef.current) {
+      setShowToggleNudge(false);
+      return undefined;
+    }
+
+    let clearTimer: number | undefined;
+
+    const timer = window.setTimeout(() => {
+      hasShownNudgeRef.current = true;
+      setShowToggleNudge(true);
+      clearTimer = window.setTimeout(() => {
+        setShowToggleNudge(false);
+      }, 900);
+    }, 8000);
+
+    return () => {
+      window.clearTimeout(timer);
+      if (clearTimer !== undefined) {
+        window.clearTimeout(clearTimer);
+      }
+    };
+  }, [open]);
 
   useEffect(() => {
     const footer = document.getElementById("site-footer");
@@ -195,7 +246,10 @@ export default function ChatWidget() {
             <div className="min-w-0">
               <p className="truncate text-sm font-semibold text-white">Vanturo Assistant</p>
               <div className="flex items-center gap-1.5">
-                <span className="h-1.5 w-1.5 rounded-full bg-[#F97316]" aria-hidden="true" />
+                <span className="relative flex h-2.5 w-2.5 items-center justify-center" aria-hidden="true">
+                  <span className="absolute h-2.5 w-2.5 rounded-full bg-[#22c55e]/35 animate-online-status-pulse" />
+                  <span className="relative h-2 w-2 rounded-full bg-[#22c55e]" />
+                </span>
                 <p className="truncate text-xs text-blue-100">Online · Instant quotes</p>
               </div>
             </div>
@@ -234,23 +288,42 @@ export default function ChatWidget() {
       </div>
 
       {!open ? (
-        <button
-          onClick={() => setOpen(true)}
-          aria-label="Open moving quote chat"
-          aria-expanded={false}
-          className="relative flex h-14 w-14 items-center justify-center rounded-full bg-[#F97316] text-white shadow-lg shadow-orange-500/40 transition hover:bg-[#EA580C] focus:outline-none focus:ring-2 focus:ring-[#FB923C] focus:ring-offset-2"
-        >
-          <span
-            className="absolute inset-0 animate-pulse-ring rounded-full bg-[#F97316]"
-            aria-hidden="true"
-          />
+        <div className="relative z-50 flex flex-col items-end gap-2">
+          {showToggleNudge ? (
+            <div className="animate-slide-up rounded-2xl bg-slate-950 px-3 py-2 text-xs font-semibold text-white shadow-lg shadow-slate-950/25">
+              Need a quote?
+              <span
+                className="absolute bottom-[-6px] right-5 h-3 w-3 rotate-45 bg-slate-950"
+                aria-hidden="true"
+              />
+            </div>
+          ) : null}
 
-          <span aria-hidden="true">
-            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="h-6 w-6">
-              <path fillRule="evenodd" d="M4.804 21.644A6.707 6.707 0 006 21.75a6.721 6.721 0 003.583-1.029c.774.182 1.584.279 2.417.279 5.322 0 9.75-3.97 9.75-9 0-5.03-4.428-9-9.75-9s-9.75 3.97-9.75 9c0 2.409 1.025 4.587 2.674 6.192.232.226.277.428.254.543a3.73 3.73 0 01-.814 1.686.75.75 0 00.44 1.223 15.03 15.03 0 003-.17z" clipRule="evenodd" />
-            </svg>
-          </span>
-        </button>
+          <button
+            onClick={() => setOpen(true)}
+            aria-label="Open moving quote chat"
+            aria-expanded={false}
+            className="relative flex h-14 w-14 items-center justify-center rounded-full bg-[#F97316] text-white shadow-lg shadow-orange-500/40 transition hover:bg-[#EA580C] focus:outline-none focus:ring-2 focus:ring-[#FB923C] focus:ring-offset-2"
+          >
+            <span
+              className={[
+                "absolute inset-0 rounded-full",
+                showToggleNudge ? "animate-chat-toggle-nudge" : "",
+              ].join(" ")}
+              aria-hidden="true"
+            />
+            <span
+              className="absolute inset-0 animate-pulse-ring rounded-full bg-[#F97316]"
+              aria-hidden="true"
+            />
+
+            <span aria-hidden="true">
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="h-6 w-6">
+                <path fillRule="evenodd" d="M4.804 21.644A6.707 6.707 0 006 21.75a6.721 6.721 0 003.583-1.029c.774.182 1.584.279 2.417.279 5.322 0 9.75-3.97 9.75-9 0-5.03-4.428-9-9.75-9s-9.75 3.97-9.75 9c0 2.409 1.025 4.587 2.674 6.192.232.226.277.428.254.543a3.73 3.73 0 01-.814 1.686.75.75 0 00.44 1.223 15.03 15.03 0 003-.17z" clipRule="evenodd" />
+              </svg>
+            </span>
+          </button>
+        </div>
       ) : null}
     </div>
   );

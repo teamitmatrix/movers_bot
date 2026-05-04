@@ -2,9 +2,22 @@ import OpenAI from "openai";
 import { NextResponse } from "next/server";
 
 import { ApiError, toErrorResponse } from "@/lib/apiError";
+import {
+  buildQuoteAdjustmentSummary,
+  isServiceAddOnId,
+  SERVICE_ADDONS,
+  type QuoteAdjustmentSummary,
+  type ServiceAddOnId,
+} from "@/lib/bookingPricing";
 import { makeLogger } from "@/lib/logger";
 import { connectToDatabase } from "@/lib/mongodb";
-import { calculateMovePrice, type PricingItem, type PricingResult } from "@/lib/pricing";
+import {
+  calculateDistanceMiles,
+  calculateMovePrice,
+  type PricingItem,
+  type PricingResult,
+  zipToCoordinates,
+} from "@/lib/pricing";
 import { checkRateLimit, getClientIp } from "@/lib/rateLimit";
 import type { PartialBookingData } from "@/models/Conversation";
 import Order, { assignOrderNumber, formatOrderId } from "@/models/Order";
@@ -19,6 +32,12 @@ type BookingDetails = {
   pickupZip?: string;
   dropoffZip?: string;
   items: PricingItem[];
+  selectedAddOns?: ServiceAddOnId[];
+  upsellReviewed?: boolean;
+  discountApplied?: boolean;
+  moveDate?: string;
+  inventorySize?: string;
+  leadCaptured?: boolean;
   customerName?: string;
   customerPhone?: string;
   customerEmail?: string;
@@ -27,11 +46,29 @@ type BookingDetails = {
 type StructuredResponse = {
   details: BookingDetails | null;
   priceQuote: PricingResult | null;
+  pricingSummary?: QuoteAdjustmentSummary | null;
+  prompt?:
+    | {
+        type: "discount-offer";
+        discountedTotal: number;
+      }
+    | {
+        type: "lead-capture";
+      }
+    | null;
   order:
     | {
         id: string;
         status: string;
         totalPrice: number;
+        selectedAddOns?: ServiceAddOnId[];
+        discountApplied?: boolean;
+        discountAmount?: number;
+        pickupZip?: string;
+        dropoffZip?: string;
+        moveDate?: string;
+        inventorySize?: string;
+        customerName?: string;
       }
     | null;
 };
@@ -43,94 +80,160 @@ const MODEL_CANDIDATES = [PRIMARY_MODEL, FALLBACK_MODEL].filter(
 );
 const MAX_ASSISTANT_TOKENS = 220;
 const DEMO_SESSION_MAX_USER_MESSAGES = 10;
+const LOCAL_MOVE_DISTANCE_THRESHOLD = 120;
 
 const CACHED_ANSWERS = new Map<string, string>([
   ["are you insured", "Yes. Vanturo is fully insured. What are your pickup and dropoff ZIP codes?"],
   ["do you do long distance moves", "Yes. We handle local and long-distance moves across the US. What are your pickup and dropoff ZIP codes?"],
   ["what states do you serve", "We support moves across the US. Share your pickup and dropoff ZIP codes to continue."],
-  ["what is your phone number", "You can reach Vanturo at 1-800-123-4567."],
-  ["how fast can i get a quote", "Usually in under 60 seconds. Please share pickup ZIP, dropoff ZIP, and the items you are moving."],
+  ["what is your phone number", "You can reach Vanturo at (555) 100-2000."],
+  ["how fast can i get a quote", "Usually in under 60 seconds. Please share your pickup ZIP and dropoff ZIP to get started."],
 ]);
 
+const PRICE_OBJECTION_RE = /\b(too expensive|that's a lot|too much|can you do better|cheaper)\b/i;
+const MAYBE_LATER_RE = /\b(let me think|i'?ll get back|not sure|maybe later)\b/i;
+const INSURANCE_RE = /\b(do you have insurance|are you insured|licensed)\b/i;
+const TIMING_RE = /\b(how long|how many hours|time)\b/i;
+
 function buildSystemPrompt(quoteAlreadyGiven: boolean): string {
-  const base = [
-    "You are a friendly, conversational AI assistant for Vanturo moving service.",
-    "You behave like a real human agent, not a form bot.",
-    "You can chat naturally, help with booking, and answer questions.",
-    "Keep replies concise (50–150 tokens), clear, and natural.",
-    "Respond to greetings, thanks, and casual messages warmly (e.g., 'You're welcome!', 'Happy to help!').",
-    "Do NOT repeat previous messages unless explicitly asked.",
-    "Do NOT force booking flow if the user is chatting casually.",
-    "Do NOT ask for name, phone, or email — a form handles that after the quote.",
-    "Never invent values and never calculate pricing yourself.",
-  ];
+  const companyContext = `
+You are Maya, a friendly and conversational booking assistant for Vanturo Moving.
+You talk like a real human agent — warm, helpful, and natural.
+
+COMPANY INFO:
+- Name: Vanturo Moving
+- Phone: (555) 100-2000
+- Email: hello@vanturo.com
+- License: FMCSA licensed, USDOT #2089147
+- Insurance: All moves insured up to $50,000
+- Services: Local moves, long-distance, packing, storage, furniture moving, commercial
+- Hours: Mon–Sat 8am–8pm (AI available 24/7)
+- Cancellation: Free up to 48 hours before move date
+- Payment: Credit card, cash, or Zelle — due on move day
+
+PRICING:
+- Local move (same state): from $299 base
+- Long-distance (different state): from $899 base
+- Add $50 per bedroom above studio
+- Distance surcharge: 500–1000 miles +$150, 1000+ miles +$300
+- Add-ons: Packing $150, Storage $99/mo, Disassembly $75, Specialty items from $100
+
+TONE RULES (NEVER break these):
+- Always respond to greetings, thanks, and casual messages naturally
+  Examples: "thanks" → "You're welcome! Let me know if you need anything else."
+            "hey" → "Hey! How can I help you today?"
+            "ok" → "Sounds good! Just let me know when you're ready."
+- Keep replies concise: 1–3 short sentences max unless explaining something complex
+- Never sound robotic or like a form
+- Never repeat yourself or re-summarize the quote unprompted
+- Never force the booking flow into a casual conversation
+`;
 
   if (quoteAlreadyGiven) {
-    return [
-      ...base,
-      "A price quote has already been provided in this conversation.",
-      "You are now in POST-QUOTE mode.",
-      
-      "Rules for this mode:",
-      "- Do NOT call calculate_price again.",
-      "- Do NOT repeat the quote unless the user explicitly asks for it.",
-      "- If user says thanks → respond naturally (do NOT mention quote again).",
-      "- If user asks a question → answer helpfully like a human agent.",
-      "- If user wants to proceed → guide them to complete the form.",
-      "- If user asks about their move → refer to known details without repeating full quote unnecessarily.",
+    return `${companyContext}
 
-      "Always prioritize natural conversation over repeating booking steps.",
-    ].join(" ");
+CURRENT STATE: Quote already provided.
+
+YOUR ROLE NOW:
+- You are a support agent helping the customer after their quote
+- The booking form is already visible below the chat — do NOT mention it repeatedly
+- Only say "complete the form below" once if they explicitly ask how to book
+- Answer questions, handle objections, negotiate if needed, and chat naturally
+
+NEGOTIATION RULES (only if customer pushes back on price):
+- First offer: 10% discount "if they book today"
+- If they still resist: offer 15% max
+- If they want more than 15%: politely decline and highlight value (insured, licensed, no hidden fees)
+- Never volunteer a discount — only offer when customer says price is too high
+
+WHAT NOT TO DO:
+- Do NOT call calculate_price again
+- Do NOT re-show the quote unless explicitly asked
+- Do NOT ask for name/phone/email (the form handles that)
+- Do NOT say "fill in the form" unless the customer asks how to confirm
+`;
   }
 
-  return [
-    ...base,
-    "You are in PRE-QUOTE mode.",
+  return `${companyContext}
 
-    "Your goal is to collect:",
-    "- pickup ZIP",
-    "- dropoff ZIP",
-    "- items (type + quantity)",
+CURRENT STATE: No quote given yet.
 
-    "Rules:",
-    "- Ask ONLY one question at a time.",
-    "- If user is chatting casually → respond normally, do NOT force booking.",
-    "- Once all required info is collected → call calculate_price.",
-    "- After providing a quote, say exactly:",
-    "  'To confirm your booking, please fill in the form below.'",
-    "- Then switch naturally to conversation mode if user continues chatting.",
-  ].join(" ");
+YOUR ROLE NOW:
+Collect 3 pieces of info to generate a quote. Ask ONE question at a time.
+
+COLLECTION ORDER:
+1. Pickup ZIP code
+2. Dropoff ZIP code
+3. What they're moving (home size or item description)
+
+Once all 3 are collected → call calculate_price immediately.
+After the quote is shown → say ONCE: "To confirm your booking, fill in the form below."
+Then switch to natural conversation mode — do NOT keep pushing the form.
+
+WHAT NOT TO DO:
+- Do NOT ask for name/phone/email (the form handles that)
+- Do NOT calculate or guess prices yourself — always use calculate_price tool
+- Do NOT ask for ZIP codes if the customer is just chatting casually
+- Do NOT ask multiple questions at once
+`;
 }
 
 function buildSupportSystemPrompt(partial: PartialBookingData, orderId: string): string {
   const itemSummary =
-    partial.items?.map((i) => `${i.quantity}x ${i.type}`).join(", ") ?? "unknown items";
+    partial.items?.map((i) => `${i.quantity}x ${i.type}`).join(", ") ?? "not specified";
 
-  return [
-    "You are a friendly human-like support agent for Vanturo moving service.",
-    "The user has already placed an order.",
+  const addOnSummary =
+    partial.selectedAddOns
+      ?.map((id) => SERVICE_ADDONS.find((a) => a.id === id)?.shortLabel ?? id)
+      .join(", ") || "none";
 
-    `Order ID: ${orderId}.`,
-    `Route: ${partial.pickupZip ?? "?"} → ${partial.dropoffZip ?? "?"}.`,
-    `Items: ${itemSummary}.`,
+  return `
+You are Maya, a friendly support agent for Vanturo Moving.
+The customer has already placed an order. Help them with it naturally.
 
-    "Your role:",
-    "- Answer questions about the order",
-    "- Provide status updates",
-    "- Help with changes (date, items, etc.)",
-    "- Reassure the customer",
+ORDER DETAILS:
+- Order ID: ${orderId}
+- Route: ${partial.pickupZip ?? "?"} → ${partial.dropoffZip ?? "?"}
+- Move date: ${partial.moveDate ?? "not set"}
+- Home size: ${partial.inventorySize ?? "not specified"}
+- Add-ons: ${addOnSummary}
+- Items: ${itemSummary}
 
-    "Behavior rules:",
-    "- Be conversational and natural",
-    "- If user says thanks → respond politely (e.g., 'You're welcome!')",
-    "- If user asks for order details → summarize clearly",
-    "- Do NOT repeat all details unless needed",
-    "- Do NOT call tools",
-    "- Do NOT create new orders",
-    "- Do NOT calculate pricing",
+YOUR ROLE:
+- Answer questions about this order clearly and naturally
+- Provide status updates based on the details above
+- Help with change requests (reassure them a team member will confirm changes)
+- Be conversational — this is a chat, not a report
 
-    "Keep responses concise (60–180 tokens).",
-  ].join(" ");
+TONE RULES (NEVER break these):
+- "thanks" → "You're welcome! Anything else I can help with?"
+- "what's my order id?" → give them the Order ID clearly
+- "what did I order?" → give a brief friendly summary, not a data dump
+- Keep replies to 1–3 sentences unless they ask for full details
+- Never list all order details unprompted — only share what's relevant to their question
+
+WHAT NOT TO DO:
+- Do NOT call any tools
+- Do NOT create new orders or calculate new prices
+- Do NOT repeat all order details in every message
+- Do NOT sound like you're reading from a database
+`;
+}
+
+function formatCurrency(value: number) {
+  return value.toLocaleString("en-US", { style: "currency", currency: "USD" });
+}
+
+function formatMoveTiming(distance: number) {
+  if (distance <= LOCAL_MOVE_DISTANCE_THRESHOLD) {
+    return "Most moves your size take 3-5 hours.";
+  }
+
+  return "Long distance moves typically take 2-4 days door to door.";
+}
+
+function getLastUserMessage(messages: IncomingMessage[]) {
+  return [...messages].reverse().find((message) => message.role === "user") ?? null;
 }
 const TOOLS = [
   {
@@ -212,11 +315,19 @@ const TOOLS = [
           customer_email: {
             type: "string",
           },
+          move_date: {
+            type: "string",
+          },
+          inventory_size: {
+            type: "string",
+          },
         },
         required: [
           "pickup_zip",
           "dropoff_zip",
           "items",
+          "move_date",
+          "inventory_size",
           "customer_name",
           "customer_phone",
         ],
@@ -393,6 +504,23 @@ function normalizeBookingDetails(args: Record<string, unknown>): BookingDetails 
           )
           .map((item) => ({ type: item.type as PricingItem["type"], quantity: item.quantity }))
       : [],
+    selectedAddOns: Array.isArray(args.selected_add_ons)
+      ? args.selected_add_ons.filter(isServiceAddOnId)
+      : Array.isArray(args.selectedAddOns)
+        ? args.selectedAddOns.filter(isServiceAddOnId)
+        : [],
+    upsellReviewed:
+      typeof args.upsell_reviewed === "boolean"
+        ? args.upsell_reviewed
+        : typeof args.upsellReviewed === "boolean"
+          ? args.upsellReviewed
+          : undefined,
+    discountApplied:
+      typeof args.discount_applied === "boolean"
+        ? args.discount_applied
+        : typeof args.discountApplied === "boolean"
+          ? args.discountApplied
+          : undefined,
     customerName:
       typeof args.customer_name === "string"
         ? args.customer_name
@@ -411,6 +539,24 @@ function normalizeBookingDetails(args: Record<string, unknown>): BookingDetails 
         : typeof args.customerEmail === "string"
           ? args.customerEmail
           : undefined,
+    moveDate:
+      typeof args.move_date === "string"
+        ? args.move_date
+        : typeof args.moveDate === "string"
+          ? args.moveDate
+          : undefined,
+    inventorySize:
+      typeof args.inventory_size === "string"
+        ? args.inventory_size
+        : typeof args.inventorySize === "string"
+          ? args.inventorySize
+          : undefined,
+    leadCaptured:
+      typeof args.lead_captured === "boolean"
+        ? args.lead_captured
+        : typeof args.leadCaptured === "boolean"
+          ? args.leadCaptured
+          : undefined,
   };
 }
 
@@ -419,6 +565,15 @@ function mergeBookingDetails(primary: BookingDetails | null, secondary: BookingD
     pickupZip: primary?.pickupZip ?? secondary.pickupZip,
     dropoffZip: primary?.dropoffZip ?? secondary.dropoffZip,
     items: primary && primary.items.length > 0 ? primary.items : secondary.items,
+    selectedAddOns:
+      primary?.selectedAddOns && primary.selectedAddOns.length > 0
+        ? primary.selectedAddOns
+        : secondary.selectedAddOns,
+    upsellReviewed: primary?.upsellReviewed ?? secondary.upsellReviewed,
+    discountApplied: primary?.discountApplied ?? secondary.discountApplied,
+    moveDate: primary?.moveDate ?? secondary.moveDate,
+    inventorySize: primary?.inventorySize ?? secondary.inventorySize,
+    leadCaptured: primary?.leadCaptured ?? secondary.leadCaptured,
     customerName: primary?.customerName ?? secondary.customerName,
     customerPhone: primary?.customerPhone ?? secondary.customerPhone,
     customerEmail: primary?.customerEmail ?? secondary.customerEmail,
@@ -498,11 +653,31 @@ function getMissingOrderFields(details: BookingDetails) {
     missingFields.push("customer_name");
   }
 
+  if (!details.moveDate) {
+    missingFields.push("move_date");
+  }
+
+  if (!details.inventorySize) {
+    missingFields.push("inventory_size");
+  }
+
   if (!details.customerPhone) {
     missingFields.push("customer_phone");
   }
 
   return missingFields;
+}
+
+function getPricingSummary(priceQuote: PricingResult | null, details: BookingDetails | null) {
+  if (!priceQuote) {
+    return null;
+  }
+
+  return buildQuoteAdjustmentSummary(
+    priceQuote,
+    details?.selectedAddOns ?? [],
+    details?.discountApplied ?? false
+  );
 }
 
 function userConfirmedBooking(messages: IncomingMessage[]) {
@@ -517,12 +692,17 @@ function userConfirmedBooking(messages: IncomingMessage[]) {
   );
 }
 
-async function createOrder(details: BookingDetails) {
+async function createOrder(details: BookingDetails, status: "confirmed" | "lead-follow-up" = "confirmed") {
   const priceQuote = calculateMovePrice({
     pickup_zip: details.pickupZip ?? "",
     dropoff_zip: details.dropoffZip ?? "",
     items: details.items,
   });
+  const pricingSummary = buildQuoteAdjustmentSummary(
+    priceQuote,
+    details.selectedAddOns ?? [],
+    details.discountApplied ?? false
+  );
 
   await connectToDatabase();
 
@@ -535,8 +715,14 @@ async function createOrder(details: BookingDetails) {
       phone: details.customerPhone,
       email: details.customerEmail,
     },
-    price: priceQuote.totalPrice,
-    status: "confirmed",
+    selectedAddOns: details.selectedAddOns,
+    originalPrice: pricingSummary.subtotal,
+    discountApplied: pricingSummary.discountApplied,
+    discountAmount: pricingSummary.discountAmount,
+    moveDate: details.moveDate,
+    inventorySize: details.inventorySize,
+    price: pricingSummary.finalTotal,
+    status,
   });
 
   await assignOrderNumber(doc);
@@ -546,9 +732,18 @@ async function createOrder(details: BookingDetails) {
     order: {
       id: formatOrderId(doc.orderNumber),
       status: doc.status,
-      totalPrice: priceQuote.totalPrice,
+      totalPrice: pricingSummary.finalTotal,
+      selectedAddOns: details.selectedAddOns,
+      discountApplied: pricingSummary.discountApplied,
+      discountAmount: pricingSummary.discountAmount,
+      pickupZip: details.pickupZip,
+      dropoffZip: details.dropoffZip,
+      moveDate: details.moveDate,
+      inventorySize: details.inventorySize,
+      customerName: details.customerName,
     },
     priceQuote,
+    pricingSummary,
   };
 }
 
@@ -567,6 +762,12 @@ function cloneStoredBookingDetails(details: PartialBookingData | null | undefine
     pickupZip: details.pickupZip,
     dropoffZip: details.dropoffZip,
     items: Array.isArray(details.items) ? [...details.items] : [],
+    selectedAddOns: details.selectedAddOns ? [...details.selectedAddOns] : [],
+    upsellReviewed: details.upsellReviewed,
+    discountApplied: details.discountApplied,
+    moveDate: details.moveDate,
+    inventorySize: details.inventorySize,
+    leadCaptured: details.leadCaptured,
     customerName: details.customerName,
     customerPhone: details.customerPhone,
     customerEmail: details.customerEmail,
@@ -595,6 +796,137 @@ export async function POST(request: Request) {
     }
     const sessionId: string | undefined =
       typeof rawSessionId === "string" ? rawSessionId : undefined;
+
+    const rawBookingProgress = body.bookingProgress as Record<string, unknown> | null | undefined;
+    if (rawBookingProgress && typeof rawBookingProgress === "object") {
+      if (!sessionId) {
+        throw new ApiError(400, "sessionId is required for booking progress updates.");
+      }
+
+      const moveDate =
+        typeof rawBookingProgress.moveDate === "string" && rawBookingProgress.moveDate.trim()
+          ? rawBookingProgress.moveDate.trim()
+          : undefined;
+      const inventorySize =
+        typeof rawBookingProgress.inventorySize === "string" && rawBookingProgress.inventorySize.trim()
+          ? rawBookingProgress.inventorySize.trim()
+          : undefined;
+      const selectedAddOns = Array.isArray(rawBookingProgress.selectedAddOns)
+        ? rawBookingProgress.selectedAddOns.filter(isServiceAddOnId)
+        : undefined;
+      const upsellReviewed =
+        typeof rawBookingProgress.upsellReviewed === "boolean"
+          ? rawBookingProgress.upsellReviewed
+          : undefined;
+      const discountApplied =
+        typeof rawBookingProgress.discountApplied === "boolean"
+          ? rawBookingProgress.discountApplied
+          : undefined;
+
+      if (
+        !moveDate &&
+        !inventorySize &&
+        selectedAddOns === undefined &&
+        upsellReviewed === undefined &&
+        discountApplied === undefined
+      ) {
+        throw new ApiError(400, "No booking progress details were provided.");
+      }
+
+      await connectToDatabase();
+      const progressSession = await Conversation.findOne({ sessionId });
+      if (!progressSession) {
+        throw new ApiError(400, "Session not found. Please start a new chat.");
+      }
+
+      progressSession.partialData = {
+        ...(progressSession.partialData ?? {}),
+        ...(selectedAddOns !== undefined ? { selectedAddOns } : {}),
+        ...(upsellReviewed !== undefined ? { upsellReviewed } : {}),
+        ...(discountApplied !== undefined ? { discountApplied } : {}),
+        ...(moveDate ? { moveDate } : {}),
+        ...(inventorySize ? { inventorySize } : {}),
+      };
+      progressSession.expiresAt = sessionExpiry();
+      await progressSession.save();
+
+      return NextResponse.json({
+        sessionId: progressSession.sessionId,
+        partialData: progressSession.partialData,
+      });
+    }
+
+    const rawLeadForm = body.leadForm as Record<string, unknown> | null | undefined;
+    if (rawLeadForm && typeof rawLeadForm === "object") {
+      const name = typeof rawLeadForm.name === "string" ? rawLeadForm.name.trim() : "";
+      const phone = typeof rawLeadForm.phone === "string" ? rawLeadForm.phone.trim() : "";
+
+      if (!name || name.length < 2) {
+        throw new ApiError(400, "Please provide a valid full name.");
+      }
+      if (!phone) {
+        throw new ApiError(400, "Please provide a phone number.");
+      }
+      if (!sessionId) {
+        throw new ApiError(400, "sessionId is required for lead follow-up submission.");
+      }
+
+      await connectToDatabase();
+      const leadSession = await Conversation.findOne({ sessionId });
+      if (!leadSession) {
+        throw new ApiError(400, "Session not found. Please start a new chat.");
+      }
+
+      const partial = leadSession.partialData;
+      if (!partial?.pickupZip || !partial?.dropoffZip || !partial?.items?.length) {
+        throw new ApiError(
+          400,
+          "Move details not found. Please tell us your pickup ZIP, dropoff ZIP, and items first."
+        );
+      }
+
+      const created = await createOrder(
+        {
+          pickupZip: partial.pickupZip,
+          dropoffZip: partial.dropoffZip,
+          items: partial.items,
+          selectedAddOns: partial.selectedAddOns,
+          upsellReviewed: partial.upsellReviewed,
+          discountApplied: partial.discountApplied,
+          moveDate: partial.moveDate,
+          inventorySize: partial.inventorySize,
+          customerName: name,
+          customerPhone: phone,
+          leadCaptured: true,
+        },
+        "lead-follow-up"
+      );
+
+      const leadMsg = `Thanks, ${name}. We saved your quote and a coordinator will follow up when you're ready.`;
+
+      leadSession.partialData = {
+        ...(leadSession.partialData ?? {}),
+        customerName: name,
+        customerPhone: phone,
+        leadCaptured: true,
+      };
+      leadSession.orderId = created.order.id;
+      leadSession.messages.push({ role: "assistant", content: leadMsg, timestamp: new Date() });
+      leadSession.expiresAt = sessionExpiry();
+      await leadSession.save();
+
+      return NextResponse.json({
+        assistantMessage: leadMsg,
+        structuredData: {
+          details: cloneStoredBookingDetails(leadSession.partialData),
+          priceQuote: created.priceQuote,
+          pricingSummary: created.pricingSummary,
+          prompt: null,
+          order: created.order,
+        },
+        sessionId: leadSession.sessionId,
+      });
+    }
 
     // ── Contact form submission path (bypasses AI entirely) ──────────────────
     const rawContactForm = body.contactForm as Record<string, unknown> | null | undefined;
@@ -637,26 +969,39 @@ export async function POST(request: Request) {
           "Move details not found. Please tell us your pickup ZIP, dropoff ZIP, and items first."
         );
       }
+      if (!partial.moveDate) {
+        throw new ApiError(400, "Please choose your move date before confirming the booking.");
+      }
+      if (!partial.inventorySize) {
+        throw new ApiError(400, "Please choose what you're moving before confirming the booking.");
+      }
 
       const bookingDetails: BookingDetails = {
         pickupZip: partial.pickupZip,
         dropoffZip: partial.dropoffZip,
         items: partial.items,
+        selectedAddOns: partial.selectedAddOns,
+        upsellReviewed: partial.upsellReviewed,
+        discountApplied: partial.discountApplied,
+        moveDate: partial.moveDate,
+        inventorySize: partial.inventorySize,
         customerName: name,
         customerPhone: phone,
         customerEmail: email,
       };
 
-      const { order, priceQuote } = await createOrder(bookingDetails);
+      const { order, priceQuote, pricingSummary } = await createOrder(bookingDetails);
 
-      const formattedTotal = priceQuote.totalPrice.toLocaleString("en-US", {
-        style: "currency",
-        currency: "USD",
-      });
-      const confirmMsg = `Booking confirmed! ${order.id} — ${formattedTotal}\nRoute: ${partial.pickupZip} → ${partial.dropoffZip}\nWe'll be in touch at ${phone}.`;
+      const formattedTotal = formatCurrency(pricingSummary.finalTotal);
+      const confirmMsg = `Booking confirmed! ${order.id} — ${formattedTotal}\nRoute: ${partial.pickupZip} → ${partial.dropoffZip}\nDate: ${partial.moveDate}\nHome size: ${partial.inventorySize}\nName: ${name}\nWe'll call you within 2 hours to confirm your crew.`;
 
       formSession.partialData = {
         ...(formSession.partialData ?? {}),
+        selectedAddOns: partial.selectedAddOns,
+        upsellReviewed: partial.upsellReviewed,
+        discountApplied: partial.discountApplied,
+        moveDate: partial.moveDate,
+        inventorySize: partial.inventorySize,
         customerName: name,
         customerPhone: phone,
         customerEmail: email,
@@ -671,7 +1016,7 @@ export async function POST(request: Request) {
 
       return NextResponse.json({
         assistantMessage: confirmMsg,
-        structuredData: { details: bookingDetails, priceQuote, order },
+        structuredData: { details: bookingDetails, priceQuote, pricingSummary, prompt: null, order },
         sessionId: formSession.sessionId,
       });
     }
@@ -716,35 +1061,6 @@ export async function POST(request: Request) {
 
     logger.info("Chat request", { sessionId, messageCount: messages.length });
 
-    const cachedAnswer = getCachedAnswer(messages);
-
-    if (cachedAnswer) {
-      logger.info("Served cached chat answer", {
-        sessionId,
-        responseLength: cachedAnswer.length,
-      });
-
-      if (dbSession) {
-        const lastUserMsg = [...messages].reverse().find((message) => message.role === "user");
-        if (lastUserMsg) {
-          dbSession.messages.push({ role: "user", content: lastUserMsg.content, timestamp: new Date() });
-        }
-        dbSession.messages.push({ role: "assistant", content: cachedAnswer, timestamp: new Date() });
-        dbSession.expiresAt = sessionExpiry();
-        await dbSession.save();
-      }
-
-      return NextResponse.json({
-        assistantMessage: cachedAnswer,
-        structuredData: {
-          details: dbSession?.partialData ?? null,
-          priceQuote: null,
-          order: null,
-        },
-        sessionId: dbSession?.sessionId ?? null,
-      });
-    }
-
     // Pre-populate priceQuote from stored partial data so the UI knows a quote was already given
     const storedDetails = cloneStoredBookingDetails(dbSession?.partialData ?? null);
     const storedPriceQuote = (() => {
@@ -785,8 +1101,90 @@ export async function POST(request: Request) {
     const structuredData: StructuredResponse = {
       details: storedDetails,
       priceQuote: storedPriceQuote,
+      pricingSummary: getPricingSummary(storedPriceQuote, storedDetails),
+      prompt: null,
       order: null,
     };
+
+    const lastUserMessage = getLastUserMessage(messages);
+
+    if (lastUserMessage) {
+      const lastContent = lastUserMessage.content.trim();
+      const mergedDetails = mergeBookingDetails(
+        structuredData.details,
+        inferBookingDetailsFromMessages(messages)
+      );
+
+      structuredData.details = mergedDetails;
+      structuredData.pricingSummary = getPricingSummary(storedPriceQuote, mergedDetails);
+
+      let handledReply: string | null = null;
+
+      if (PRICE_OBJECTION_RE.test(lastContent) && structuredData.pricingSummary && storedPriceQuote) {
+        const discountedSummary = buildQuoteAdjustmentSummary(
+          storedPriceQuote,
+          mergedDetails.selectedAddOns ?? [],
+          true
+        );
+        handledReply = `I understand — moving costs can add up. I can offer you a 10% discount if you book today. That brings your total to ${formatCurrency(discountedSummary.finalTotal)}. Want to lock that in?`;
+        structuredData.prompt = {
+          type: "discount-offer",
+          discountedTotal: discountedSummary.finalTotal,
+        };
+      } else if (MAYBE_LATER_RE.test(lastContent)) {
+        handledReply = "No problem. Can I grab your name and number so we can follow up when you're ready? No obligation at all.";
+        structuredData.prompt = { type: "lead-capture" };
+      } else if (INSURANCE_RE.test(lastContent)) {
+        handledReply = "Yes! We're fully FMCSA licensed and every move is insured up to $50,000, so your belongings are protected throughout the move.";
+      } else if (TIMING_RE.test(lastContent) && mergedDetails.pickupZip && mergedDetails.dropoffZip) {
+        const distance = calculateDistanceMiles(
+          zipToCoordinates(mergedDetails.pickupZip),
+          zipToCoordinates(mergedDetails.dropoffZip)
+        );
+        handledReply = formatMoveTiming(distance);
+      }
+
+      if (handledReply) {
+        if (dbSession) {
+          dbSession.messages.push({ role: "user", content: lastUserMessage.content, timestamp: new Date() });
+          dbSession.messages.push({ role: "assistant", content: handledReply, timestamp: new Date() });
+          dbSession.partialData = {
+            ...(dbSession.partialData ?? {}),
+            ...structuredData.details,
+          };
+          dbSession.expiresAt = sessionExpiry();
+          await dbSession.save();
+        }
+
+        return NextResponse.json({
+          assistantMessage: handledReply,
+          structuredData,
+          sessionId: dbSession?.sessionId ?? null,
+        });
+      }
+    }
+
+    const cachedAnswer = getCachedAnswer(messages);
+
+    if (cachedAnswer) {
+      logger.info("Served cached chat answer", {
+        sessionId,
+        responseLength: cachedAnswer.length,
+      });
+
+      if (dbSession && lastUserMessage) {
+        dbSession.messages.push({ role: "user", content: lastUserMessage.content, timestamp: new Date() });
+        dbSession.messages.push({ role: "assistant", content: cachedAnswer, timestamp: new Date() });
+        dbSession.expiresAt = sessionExpiry();
+        await dbSession.save();
+      }
+
+      return NextResponse.json({
+        assistantMessage: cachedAnswer,
+        structuredData,
+        sessionId: dbSession?.sessionId ?? null,
+      });
+    }
 
     for (let step = 0; step < 5; step += 1) {
       const { completion, model } = await createChatCompletion(client, {
@@ -829,6 +1227,7 @@ export async function POST(request: Request) {
               dropoff_zip: mergedDetails.dropoffZip ?? "",
               items: mergedDetails.items,
             });
+            structuredData.pricingSummary = getPricingSummary(structuredData.priceQuote, mergedDetails);
           }
 
           assistantText = buildFallbackAssistantMessage(mergedDetails, structuredData, quoteAlreadyGiven);
@@ -892,6 +1291,10 @@ export async function POST(request: Request) {
           ...structuredData.details,
           ...details,
           items: details.items.length > 0 ? details.items : structuredData.details?.items ?? [],
+          selectedAddOns:
+            details.selectedAddOns && details.selectedAddOns.length > 0
+              ? details.selectedAddOns
+              : structuredData.details?.selectedAddOns ?? [],
         };
 
         let toolResult: unknown;
@@ -912,6 +1315,7 @@ export async function POST(request: Request) {
               items: details.items,
             });
             structuredData.priceQuote = toolResult as PricingResult;
+            structuredData.pricingSummary = getPricingSummary(structuredData.priceQuote, structuredData.details);
           }
         }
 
@@ -938,6 +1342,7 @@ export async function POST(request: Request) {
           } else {
             const created = await createOrder(details);
             structuredData.priceQuote = created.priceQuote;
+            structuredData.pricingSummary = created.pricingSummary;
             structuredData.order = created.order;
             toolResult = created;
             logger.info("Order created", { orderId: created.order.id });
@@ -946,6 +1351,10 @@ export async function POST(request: Request) {
             if (dbSession) {
               dbSession.status = "booked";
               dbSession.orderId = created.order.id;
+              dbSession.partialData = {
+                ...(dbSession.partialData ?? {}),
+                ...details,
+              };
             }
           }
         }

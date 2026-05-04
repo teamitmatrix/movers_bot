@@ -1,10 +1,9 @@
-import { getServerSession } from "next-auth";
 import { NextResponse } from "next/server";
 
 import { ApiError, toErrorResponse } from "@/lib/apiError";
+import { SERVICE_ADDONS, type ServiceAddOnId } from "@/lib/bookingPricing";
 import { makeLogger } from "@/lib/logger";
 import { connectToDatabase } from "@/lib/mongodb";
-import { authOptions } from "@/lib/auth";
 import type { PricingItemType } from "@/lib/pricing";
 import Order, {
   type CustomerInfo,
@@ -23,6 +22,12 @@ type CreateOrderRequest = {
   items?: OrderItem[];
   price?: number;
   customer?: CustomerInfo;
+  selectedAddOns?: ServiceAddOnId[];
+  originalPrice?: number;
+  discountApplied?: boolean;
+  discountAmount?: number;
+  moveDate?: string;
+  inventorySize?: string;
   status?: OrderStatus;
 };
 
@@ -35,7 +40,8 @@ const VALID_ITEM_TYPES: PricingItemType[] = [
   "piano",
 ];
 
-const VALID_STATUSES: OrderStatus[] = ["pending", "confirmed", "completed"];
+const VALID_STATUSES: OrderStatus[] = ["pending", "confirmed", "completed", "lead-follow-up"];
+const VALID_ADD_ONS = SERVICE_ADDONS.map((addOn) => addOn.id);
 
 function serializeOrder(order: OrderDocument & { _id: { toString(): string } }) {
   return {
@@ -46,7 +52,13 @@ function serializeOrder(order: OrderDocument & { _id: { toString(): string } }) 
     dropoff: order.dropoff,
     items: order.items,
     price: order.price,
+    selectedAddOns: order.selectedAddOns ?? [],
+    originalPrice: order.originalPrice ?? null,
+    discountApplied: order.discountApplied ?? false,
+    discountAmount: order.discountAmount ?? 0,
     customer: order.customer,
+    moveDate: order.moveDate ?? null,
+    inventorySize: order.inventorySize ?? null,
     status: order.status,
     createdAt: order.createdAt,
     updatedAt: order.updatedAt,
@@ -128,8 +140,34 @@ function validateOrderInput(body: CreateOrderRequest) {
     errors.push("price must be a non-negative number.");
   }
 
+  if (
+    body.selectedAddOns !== undefined &&
+    (!Array.isArray(body.selectedAddOns) ||
+      !body.selectedAddOns.every((value) => typeof value === "string" && VALID_ADD_ONS.includes(value)))
+  ) {
+    errors.push("selectedAddOns must be a valid array of add-on identifiers.");
+  }
+
+  if (
+    body.originalPrice !== undefined &&
+    (typeof body.originalPrice !== "number" || !Number.isFinite(body.originalPrice) || body.originalPrice < 0)
+  ) {
+    errors.push("originalPrice must be a non-negative number.");
+  }
+
+  if (body.discountApplied !== undefined && typeof body.discountApplied !== "boolean") {
+    errors.push("discountApplied must be a boolean.");
+  }
+
+  if (
+    body.discountAmount !== undefined &&
+    (typeof body.discountAmount !== "number" || !Number.isFinite(body.discountAmount) || body.discountAmount < 0)
+  ) {
+    errors.push("discountAmount must be a non-negative number.");
+  }
+
   if (body.status !== undefined && !VALID_STATUSES.includes(body.status)) {
-    errors.push("status must be one of: pending, confirmed, completed.");
+    errors.push("status must be one of: pending, confirmed, completed, lead-follow-up.");
   }
 
   return errors;
@@ -137,11 +175,6 @@ function validateOrderInput(body: CreateOrderRequest) {
 
 export async function GET() {
   try {
-    const session = await getServerSession(authOptions);
-    if (!session) {
-      return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
-    }
-
     await connectToDatabase();
 
     const orders = await Order.find().sort({ createdAt: -1 }).lean();
@@ -160,11 +193,6 @@ export async function GET() {
 
 export async function POST(request: Request) {
   try {
-    const session = await getServerSession(authOptions);
-    if (!session) {
-      return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
-    }
-
     const body = await request.json().catch(() => {
       throw new ApiError(400, "Request body must be valid JSON.");
     }) as CreateOrderRequest;
@@ -181,7 +209,13 @@ export async function POST(request: Request) {
       dropoff: body.dropoff,
       items: body.items,
       price: body.price,
+      selectedAddOns: body.selectedAddOns,
+      originalPrice: body.originalPrice,
+      discountApplied: body.discountApplied,
+      discountAmount: body.discountAmount,
       customer: body.customer,
+      moveDate: body.moveDate,
+      inventorySize: body.inventorySize,
       status: body.status ?? "pending",
     });
 

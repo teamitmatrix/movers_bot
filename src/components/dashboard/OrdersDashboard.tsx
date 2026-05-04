@@ -2,7 +2,8 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import AdminSignOutButton from "@/components/dashboard/AdminSignOutButton";
+
+import { SERVICE_ADDONS, type ServiceAddOnId } from "@/lib/bookingPricing";
 
 function ClipboardIcon() {
   return (
@@ -67,18 +68,35 @@ type DashboardOrder = {
     zip: string;
   };
   price: number;
-  status: "pending" | "confirmed" | "completed";
+  status: "pending" | "confirmed" | "completed" | "lead-follow-up";
+  selectedAddOns?: ServiceAddOnId[];
+  originalPrice?: number | null;
+  discountApplied?: boolean;
+  discountAmount?: number;
   customer: {
     name: string;
   };
+  moveDate?: string | null;
+  inventorySize?: string | null;
   createdAt: string;
 };
 
+
+function formatStatusLabel(status: DashboardOrder["status"]) {
+  return status === "lead-follow-up" ? "Lead Follow Up" : status;
+}
+
+function formatSelectedAddOns(addOns: ServiceAddOnId[] = []) {
+  return SERVICE_ADDONS.filter((addOn) => addOns.includes(addOn.id))
+    .map((addOn) => addOn.shortLabel)
+    .join(", ");
+}
 type SortDirection = "newest" | "oldest";
 
 const statusStyles: Record<DashboardOrder["status"], string> = {
   pending: "bg-amber-50 text-amber-700 ring-amber-200",
   confirmed: "bg-emerald-50 text-emerald-700 ring-emerald-200",
+  "lead-follow-up": "bg-violet-50 text-violet-700 ring-violet-200",
   completed: "bg-sky-50 text-sky-700 ring-sky-200",
 };
 
@@ -100,6 +118,12 @@ const orderCardThemes: Record<DashboardOrder["status"], { shell: string; panel: 
     panel: "bg-white/78 ring-1 ring-sky-100/80",
     accent: "from-sky-500 via-blue-500 to-indigo-400",
     button: "bg-slate-900 text-white",
+  },
+  "lead-follow-up": {
+    shell: "border-violet-200/80 bg-[linear-gradient(145deg,rgba(245,243,255,1)_0%,rgba(255,255,255,1)_45%,rgba(237,233,254,0.96)_100%)]",
+    panel: "bg-white/78 ring-1 ring-violet-100/80",
+    accent: "from-violet-500 via-fuchsia-500 to-pink-400",
+    button: "bg-violet-900 text-white",
   },
 };
 
@@ -127,10 +151,25 @@ function formatCurrency(value: number) {
 export default function OrdersDashboard() {
   const router = useRouter();
   const [orders, setOrders] = useState<DashboardOrder[]>([]);
+  const [searchQuery, setSearchQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<"all" | DashboardOrder["status"]>("all");
+  const [inventoryFilter, setInventoryFilter] = useState<string>("all");
+  const [moveDateFilter, setMoveDateFilter] = useState("");
   const [sortDirection, setSortDirection] = useState<SortDirection>("newest");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  const inventoryOptions = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          orders
+            .map((order) => order.inventorySize)
+            .filter((value): value is string => typeof value === "string" && value.length > 0)
+        )
+      ).sort(),
+    [orders]
+  );
 
   useEffect(() => {
     let active = true;
@@ -166,10 +205,25 @@ export default function OrdersDashboard() {
   }, []);
 
   const visibleOrders = useMemo(() => {
-    const filteredOrders =
-      statusFilter === "all"
-        ? orders
-        : orders.filter((order) => order.status === statusFilter);
+    const normalizedSearch = searchQuery.trim().toLowerCase();
+    const normalizedMoveDateFilter = moveDateFilter.trim().toLowerCase();
+
+    const filteredOrders = orders.filter((order) => {
+      const matchesStatus = statusFilter === "all" || order.status === statusFilter;
+      const matchesInventory = inventoryFilter === "all" || order.inventorySize === inventoryFilter;
+      const searchHaystack = [
+        order.customer.name,
+        order.displayId,
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+      const matchesSearch = !normalizedSearch || searchHaystack.includes(normalizedSearch);
+      const matchesMoveDate =
+        !normalizedMoveDateFilter || (order.moveDate ?? "").toLowerCase().includes(normalizedMoveDateFilter);
+
+      return matchesStatus && matchesInventory && matchesSearch && matchesMoveDate;
+    });
 
     return [...filteredOrders].sort((firstOrder, secondOrder) => {
       const firstTime = new Date(firstOrder.createdAt).getTime();
@@ -177,11 +231,11 @@ export default function OrdersDashboard() {
 
       return sortDirection === "newest" ? secondTime - firstTime : firstTime - secondTime;
     });
-  }, [orders, sortDirection, statusFilter]);
+  }, [inventoryFilter, moveDateFilter, orders, searchQuery, sortDirection, statusFilter]);
 
   const metrics = useMemo(() => {
     const pendingCount = orders.filter((order) => order.status === "pending").length;
-    const confirmedCount = orders.filter((order) => order.status === "confirmed").length;
+    const leadCount = orders.filter((order) => order.status === "lead-follow-up").length;
     const totalRevenue = orders.reduce((sum, order) => sum + order.price, 0);
 
     return [
@@ -198,9 +252,9 @@ export default function OrdersDashboard() {
         icon: <ClockIcon />,
       },
       {
-        label: "Confirmed moves",
-        value: String(confirmedCount),
-        tone: "from-[#DCFCE7] to-white text-[#15803D]",
+        label: "Follow-up leads",
+        value: String(leadCount),
+        tone: "from-[#F3E8FF] to-white text-[#7C3AED]",
         icon: <CheckCircleIcon />,
       },
       {
@@ -229,10 +283,6 @@ export default function OrdersDashboard() {
           </div>
 
           <div className="flex w-full flex-col gap-3 xl:w-[420px]">
-            <div className="flex justify-start sm:justify-end">
-              <AdminSignOutButton className="border border-white/20 bg-white/10 text-white hover:bg-white/15" />
-            </div>
-
             <div className="grid gap-3 sm:grid-cols-2">
               {metrics.map((metric) => (
                 <div
@@ -261,11 +311,22 @@ export default function OrdersDashboard() {
             Filter orders
           </p>
           <p className="mt-2 text-sm text-slate-600">
-            Narrow the queue by status or switch sorting to focus on what needs attention next.
+            Search by customer name or order ID, then narrow the queue by status, move date, and inventory type.
           </p>
         </div>
 
-        <div className="grid gap-3 sm:grid-cols-2 lg:min-w-[360px]">
+        <div className="grid gap-3 md:grid-cols-2 xl:min-w-[680px] xl:grid-cols-4">
+          <label className="flex flex-col gap-2 text-sm text-slate-600 md:col-span-2 xl:col-span-1">
+            Search
+            <input
+              type="search"
+              value={searchQuery}
+              onChange={(event) => setSearchQuery(event.target.value)}
+              placeholder="Customer or OID-101"
+              className="rounded-2xl border border-slate-300 bg-white px-4 py-3 text-sm font-medium text-slate-900 outline-none transition focus:border-slate-500"
+            />
+          </label>
+
           <label className="flex flex-col gap-2 text-sm text-slate-600">
             Status
             <select
@@ -279,6 +340,34 @@ export default function OrdersDashboard() {
               <option value="pending">Pending</option>
               <option value="confirmed">Confirmed</option>
               <option value="completed">Completed</option>
+              <option value="lead-follow-up">Lead Follow Up</option>
+            </select>
+          </label>
+
+          <label className="flex flex-col gap-2 text-sm text-slate-600">
+            Move date
+            <input
+              type="search"
+              value={moveDateFilter}
+              onChange={(event) => setMoveDateFilter(event.target.value)}
+              placeholder="This week or May 20"
+              className="rounded-2xl border border-slate-300 bg-white px-4 py-3 text-sm font-medium text-slate-900 outline-none transition focus:border-slate-500"
+            />
+          </label>
+
+          <label className="flex flex-col gap-2 text-sm text-slate-600">
+            Inventory
+            <select
+              value={inventoryFilter}
+              onChange={(event) => setInventoryFilter(event.target.value)}
+              className="rounded-2xl border border-slate-300 bg-white px-4 py-3 text-sm font-medium text-slate-900 outline-none transition focus:border-slate-500"
+            >
+              <option value="all">All sizes</option>
+              {inventoryOptions.map((option) => (
+                <option key={option} value={option}>
+                  {option}
+                </option>
+              ))}
             </select>
           </label>
 
@@ -343,7 +432,7 @@ export default function OrdersDashboard() {
                       statusStyles[order.status],
                     ].join(" ")}
                   >
-                    {order.status}
+                    {formatStatusLabel(order.status)}
                   </span>
                 </div>
 
@@ -361,6 +450,7 @@ export default function OrdersDashboard() {
                       <span className="mx-2 text-slate-300">→</span>
                       {formatLocation(order.dropoff)}
                     </p>
+                    <p className="mt-2 text-sm text-slate-500">Date: {order.moveDate ?? "Not set"}</p>
                   </div>
 
                   <div className={[
@@ -374,7 +464,14 @@ export default function OrdersDashboard() {
                     <p className="mt-3 text-2xl font-bold tracking-tight text-slate-900">
                       {formatCurrency(order.price)}
                     </p>
-                    <p className="mt-1 text-sm text-slate-500">Tap to inspect route, items, and status controls.</p>
+                    <p className="mt-1 text-sm text-slate-500">{order.inventorySize ?? "Move size pending"}</p>
+                    <p className="mt-1 text-sm text-slate-500">
+                      {order.selectedAddOns?.length
+                        ? formatSelectedAddOns(order.selectedAddOns)
+                        : order.discountApplied
+                          ? "10% discount applied"
+                          : "No add-ons selected"}
+                    </p>
                   </div>
                 </div>
 
@@ -400,6 +497,7 @@ export default function OrdersDashboard() {
                   <th className="px-5 py-4 font-semibold">Order ID</th>
                   <th className="px-5 py-4 font-semibold">Customer</th>
                   <th className="px-5 py-4 font-semibold">Route</th>
+                  <th className="px-5 py-4 font-semibold">Move date</th>
                   <th className="px-5 py-4 font-semibold">Price</th>
                   <th className="px-5 py-4 font-semibold">Status</th>
                   <th className="px-5 py-4 font-semibold">Date</th>
@@ -408,7 +506,7 @@ export default function OrdersDashboard() {
               <tbody className="divide-y divide-slate-200 bg-white text-slate-700">
                 {visibleOrders.length === 0 ? (
                   <tr>
-                    <td colSpan={6} className="px-5 py-10 text-center text-slate-500">
+                    <td colSpan={7} className="px-5 py-10 text-center text-slate-500">
                       No orders found.
                     </td>
                   </tr>
@@ -425,6 +523,7 @@ export default function OrdersDashboard() {
                     <td className="px-5 py-5">
                       {formatLocation(order.pickup)} {"->"} {formatLocation(order.dropoff)}
                     </td>
+                    <td className="px-5 py-5">{order.moveDate ?? "Not set"}</td>
                     <td className="px-5 py-5 font-semibold text-slate-900">
                       {formatCurrency(order.price)}
                     </td>
@@ -435,7 +534,7 @@ export default function OrdersDashboard() {
                           statusStyles[order.status],
                         ].join(" ")}
                       >
-                        {order.status}
+                        {formatStatusLabel(order.status)}
                       </span>
                     </td>
                     <td className="px-5 py-5">{formatDate(order.createdAt)}</td>

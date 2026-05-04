@@ -1,18 +1,16 @@
 import mongoose from "mongoose";
-import { getServerSession } from "next-auth";
 import { NextResponse } from "next/server";
 
 import { ApiError, toErrorResponse } from "@/lib/apiError";
 import { makeLogger } from "@/lib/logger";
 import { connectToDatabase } from "@/lib/mongodb";
-import { authOptions } from "@/lib/auth";
 import { calculateMovePrice, type PricingResult } from "@/lib/pricing";
 import type { OrderDocument, OrderStatus } from "@/models/Order";
 import Order, { formatOrderId } from "@/models/Order";
 
 const logger = makeLogger("/api/orders/[id]");
 
-const VALID_STATUSES: OrderStatus[] = ["pending", "confirmed", "completed"];
+const VALID_STATUSES: OrderStatus[] = ["pending", "confirmed", "completed", "lead-follow-up"];
 
 function serializeOrder(order: OrderDocument & { _id: { toString(): string } }) {
   let priceBreakdown: PricingResult | null = null;
@@ -35,7 +33,13 @@ function serializeOrder(order: OrderDocument & { _id: { toString(): string } }) 
     dropoff: order.dropoff,
     items: order.items,
     price: order.price,
+    selectedAddOns: order.selectedAddOns ?? [],
+    originalPrice: order.originalPrice ?? null,
+    discountApplied: order.discountApplied ?? false,
+    discountAmount: order.discountAmount ?? 0,
     customer: order.customer,
+    moveDate: order.moveDate ?? null,
+    inventorySize: order.inventorySize ?? null,
     status: order.status,
     priceBreakdown,
     createdAt: order.createdAt,
@@ -48,11 +52,6 @@ export async function GET(
   context: { params: { id: string } }
 ) {
   try {
-    const session = await getServerSession(authOptions);
-    if (!session) {
-      return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
-    }
-
     const { id } = context.params;
 
     if (!mongoose.Types.ObjectId.isValid(id)) {
@@ -80,11 +79,6 @@ export async function PATCH(
   context: { params: { id: string } }
 ) {
   try {
-    const session = await getServerSession(authOptions);
-    if (!session) {
-      return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
-    }
-
     const { id } = context.params;
 
     if (!mongoose.Types.ObjectId.isValid(id)) {
@@ -97,7 +91,7 @@ export async function PATCH(
 
     if (!body.status || !VALID_STATUSES.includes(body.status)) {
       return NextResponse.json(
-        { error: "status must be one of: pending, confirmed, completed." },
+        { error: "status must be one of: pending, confirmed, completed, lead-follow-up." },
         { status: 400 }
       );
     }

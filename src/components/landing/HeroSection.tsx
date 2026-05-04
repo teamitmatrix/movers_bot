@@ -44,9 +44,9 @@ export default function HeroSection({ onQuoteClick }: { onQuoteClick: () => void
             <button onClick={onQuoteClick} className="btn-primary w-full px-6 py-4 text-base sm:w-auto sm:px-8">
               Get Instant Quote
             </button>
-            <a href="tel:+18001234567" className="btn-secondary w-full px-6 py-4 text-base sm:w-auto sm:px-8">
+            <span className="btn-secondary w-full px-6 py-4 text-base sm:w-auto sm:px-8 cursor-default">
               Call Us
-            </a>
+            </span>
           </div>
 
           <p className="mt-4 text-sm text-[#64748B]">
@@ -63,7 +63,7 @@ export default function HeroSection({ onQuoteClick }: { onQuoteClick: () => void
               </div>
               <div className="self-start rounded-2xl bg-white/10 px-3 py-2 text-left sm:self-auto sm:text-right">
                 <p className="text-xs text-blue-100">Support line</p>
-                <p className="text-sm font-semibold">1-800-123-4567</p>
+                <p className="text-sm font-semibold">(555) 100-2000</p>
               </div>
             </div>
 

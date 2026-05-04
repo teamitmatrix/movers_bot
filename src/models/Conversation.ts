@@ -1,5 +1,6 @@
 import { Model, Schema, model, models } from "mongoose";
 
+import type { ServiceAddOnId } from "@/lib/bookingPricing";
 import type { PricingItem } from "@/lib/pricing";
 
 export type ConversationStatus = "active" | "booked" | "abandoned";
@@ -14,6 +15,12 @@ export interface PartialBookingData {
   pickupZip?: string;
   dropoffZip?: string;
   items?: PricingItem[];
+  selectedAddOns?: ServiceAddOnId[];
+  upsellReviewed?: boolean;
+  discountApplied?: boolean;
+  moveDate?: string;
+  inventorySize?: string;
+  leadCaptured?: boolean;
   customerName?: string;
   customerPhone?: string;
   customerEmail?: string;
@@ -70,6 +77,15 @@ const partialDataSchema = new Schema<PartialBookingData>(
     pickupZip: { type: String, trim: true },
     dropoffZip: { type: String, trim: true },
     items: { type: [pricingItemSchema], default: undefined },
+    selectedAddOns: {
+      type: [{ type: String, enum: ["full-packing-service", "storage-unit-30-days", "furniture-disassembly"] }],
+      default: undefined,
+    },
+    upsellReviewed: { type: Boolean, default: undefined },
+    discountApplied: { type: Boolean, default: undefined },
+    moveDate: { type: String, trim: true },
+    inventorySize: { type: String, trim: true },
+    leadCaptured: { type: Boolean, default: undefined },
     customerName: { type: String, trim: true },
     customerPhone: { type: String, trim: true },
     customerEmail: { type: String, trim: true },

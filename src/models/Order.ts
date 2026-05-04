@@ -1,8 +1,9 @@
 import { Model, Schema, model, models } from "mongoose";
 
+import type { ServiceAddOnId } from "@/lib/bookingPricing";
 import type { PricingItemType } from "@/lib/pricing";
 
-export type OrderStatus = "pending" | "confirmed" | "completed";
+export type OrderStatus = "pending" | "confirmed" | "completed" | "lead-follow-up";
 
 export interface LocationDetails {
   address?: string;
@@ -28,6 +29,12 @@ export interface OrderDocument {
   dropoff: LocationDetails;
   items: OrderItem[];
   customer: CustomerInfo;
+  selectedAddOns?: ServiceAddOnId[];
+  originalPrice?: number;
+  discountApplied?: boolean;
+  discountAmount?: number;
+  moveDate?: string;
+  inventorySize?: string;
   price: number;
   status: OrderStatus;
   createdAt: Date;
@@ -127,6 +134,31 @@ const orderSchema = new Schema<OrderDocument>(
       type: customerSchema,
       required: true,
     },
+    selectedAddOns: {
+      type: [{ type: String, enum: ["full-packing-service", "storage-unit-30-days", "furniture-disassembly"] }],
+      default: undefined,
+    },
+    originalPrice: {
+      type: Number,
+      min: 0,
+    },
+    discountApplied: {
+      type: Boolean,
+      default: false,
+    },
+    discountAmount: {
+      type: Number,
+      min: 0,
+      default: 0,
+    },
+    moveDate: {
+      type: String,
+      trim: true,
+    },
+    inventorySize: {
+      type: String,
+      trim: true,
+    },
     price: {
       type: Number,
       required: true,
@@ -134,7 +166,7 @@ const orderSchema = new Schema<OrderDocument>(
     },
     status: {
       type: String,
-      enum: ["pending", "confirmed", "completed"],
+      enum: ["pending", "confirmed", "completed", "lead-follow-up"],
       default: "pending",
     },
   },

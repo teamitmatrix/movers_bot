@@ -8,6 +8,7 @@
     "start": "next start",
     "lint": "next lint",
     "seed:admin": "node scripts/seed-admin.js",
+    "seed:demo": "node scripts/seed-demo-data.js",
     "postinstall": "node scripts/fix-openai-tsconfig.js"
   },
   "dependencies": {

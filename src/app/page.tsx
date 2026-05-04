@@ -4,7 +4,6 @@ import ChatWidget from "@/components/chat/ChatModal";
 import AboutSection from "@/components/landing/AboutSection";
 import Footer from "@/components/landing/Footer";
 import HeroSection from "@/components/landing/HeroSection";
-import Navbar from "@/components/landing/Navbar";
 import PricingHint from "@/components/landing/PricingHint";
 import ServicesSection from "@/components/landing/ServicesSection";
 import TrustSection from "@/components/landing/TrustSection";
@@ -17,7 +16,6 @@ function openChat() {
 export default function Home() {
   return (
     <>
-      <Navbar />
       <main>
         <HeroSection onQuoteClick={openChat} />
         <AboutSection />
