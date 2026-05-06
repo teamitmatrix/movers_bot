@@ -33,6 +33,8 @@ export interface OrderDocument {
   originalPrice?: number;
   discountApplied?: boolean;
   discountAmount?: number;
+  reminderCall?: boolean;
+  afterHours?: boolean;
   moveDate?: string;
   inventorySize?: string;
   price: number;
@@ -135,7 +137,7 @@ const orderSchema = new Schema<OrderDocument>(
       required: true,
     },
     selectedAddOns: {
-      type: [{ type: String, enum: ["full-packing-service", "storage-unit-30-days", "furniture-disassembly"] }],
+      type: [{ type: String, enum: ["same-day-service", "specialty-item-handling", "full-packing-service", "storage-unit-30-days", "furniture-disassembly"] }],
       default: undefined,
     },
     originalPrice: {
@@ -150,6 +152,14 @@ const orderSchema = new Schema<OrderDocument>(
       type: Number,
       min: 0,
       default: 0,
+    },
+    reminderCall: {
+      type: Boolean,
+      default: undefined,
+    },
+    afterHours: {
+      type: Boolean,
+      default: false,
     },
     moveDate: {
       type: String,

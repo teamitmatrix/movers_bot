@@ -18,6 +18,8 @@ export interface PartialBookingData {
   selectedAddOns?: ServiceAddOnId[];
   upsellReviewed?: boolean;
   discountApplied?: boolean;
+  reminderCall?: boolean;
+  afterHoursSession?: boolean;
   moveDate?: string;
   inventorySize?: string;
   leadCaptured?: boolean;
@@ -78,11 +80,13 @@ const partialDataSchema = new Schema<PartialBookingData>(
     dropoffZip: { type: String, trim: true },
     items: { type: [pricingItemSchema], default: undefined },
     selectedAddOns: {
-      type: [{ type: String, enum: ["full-packing-service", "storage-unit-30-days", "furniture-disassembly"] }],
+      type: [{ type: String, enum: ["same-day-service", "specialty-item-handling", "full-packing-service", "storage-unit-30-days", "furniture-disassembly"] }],
       default: undefined,
     },
     upsellReviewed: { type: Boolean, default: undefined },
     discountApplied: { type: Boolean, default: undefined },
+    reminderCall: { type: Boolean, default: undefined },
+    afterHoursSession: { type: Boolean, default: undefined },
     moveDate: { type: String, trim: true },
     inventorySize: { type: String, trim: true },
     leadCaptured: { type: Boolean, default: undefined },

@@ -73,8 +73,12 @@ type DashboardOrder = {
   originalPrice?: number | null;
   discountApplied?: boolean;
   discountAmount?: number;
+  reminderCall?: boolean | null;
+  afterHours?: boolean;
   customer: {
     name: string;
+    phone: string;
+    email?: string;
   };
   moveDate?: string | null;
   inventorySize?: string | null;
@@ -83,7 +87,10 @@ type DashboardOrder = {
 
 
 function formatStatusLabel(status: DashboardOrder["status"]) {
-  return status === "lead-follow-up" ? "Lead Follow Up" : status;
+  if (status === "confirmed") return "Confirmed";
+  if (status === "lead-follow-up") return "Lead - Follow Up";
+  if (status === "pending") return "Pending Dispatch";
+  return "Completed";
 }
 
 function formatSelectedAddOns(addOns: ServiceAddOnId[] = []) {
@@ -94,10 +101,10 @@ function formatSelectedAddOns(addOns: ServiceAddOnId[] = []) {
 type SortDirection = "newest" | "oldest";
 
 const statusStyles: Record<DashboardOrder["status"], string> = {
-  pending: "bg-amber-50 text-amber-700 ring-amber-200",
+  pending: "bg-sky-50 text-sky-700 ring-sky-200",
   confirmed: "bg-emerald-50 text-emerald-700 ring-emerald-200",
-  "lead-follow-up": "bg-violet-50 text-violet-700 ring-violet-200",
-  completed: "bg-sky-50 text-sky-700 ring-sky-200",
+  "lead-follow-up": "bg-amber-50 text-amber-700 ring-amber-200",
+  completed: "bg-slate-50 text-slate-700 ring-slate-200",
 };
 
 const orderCardThemes: Record<DashboardOrder["status"], { shell: string; panel: string; accent: string; button: string }> = {
@@ -127,9 +134,47 @@ const orderCardThemes: Record<DashboardOrder["status"], { shell: string; panel: 
   },
 };
 
+const aiSystemFeatures = [
+  {
+    icon: "🤖",
+    title: "Conversational AI Chatbot",
+    description:
+      "A fully conversational agent that talks to customers, answers questions, negotiates pricing, handles objections, and books moves - 24/7 without any human involvement.",
+  },
+  {
+    icon: "📊",
+    title: "Live Operations Dashboard",
+    description:
+      "See every lead, booking, and move status in real time. Filter by status, track revenue, and manage your pipeline from one screen.",
+  },
+  {
+    icon: "💰",
+    title: "Built-in Negotiation & Upselling",
+    description:
+      "The AI automatically upsells packing, storage, and specialty services. It also handles price objections with smart discount logic - maximizing revenue per customer.",
+  },
+  {
+    icon: "🌙",
+    title: "24/7 Lead Capture",
+    description:
+      "Never miss a lead after hours again. The AI captures name, phone, and move details at 2am and flags it for your team by morning.",
+  },
+  {
+    icon: "📱",
+    title: "SMS & Email Automation",
+    description:
+      "Automatic booking confirmations, day-before reminders, and follow-up messages sent to every customer without your team lifting a finger.",
+  },
+  {
+    icon: "⚙️",
+    title: "Fully Custom Branded",
+    description:
+      "We build and deploy this entire system under your brand, your domain, and your colors. Your customers never know it's AI-powered.",
+  },
+] as const;
+
 function formatLocation(location: DashboardOrder["pickup"]) {
-  const parts = [location.city, location.state].filter(Boolean);
-  return parts.length > 0 ? `${parts.join(", ")} (${location.zip})` : location.zip;
+  return location.zip;
 }
 
 function formatDate(value: string) {
@@ -153,23 +198,34 @@ export default function OrdersDashboard() {
   const [orders, setOrders] = useState<DashboardOrder[]>([]);
   const [searchQuery, setSearchQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<"all" | DashboardOrder["status"]>("all");
-  const [inventoryFilter, setInventoryFilter] = useState<string>("all");
-  const [moveDateFilter, setMoveDateFilter] = useState("");
+  const [moveDateFrom, setMoveDateFrom] = useState("");
+  const [moveDateTo, setMoveDateTo] = useState("");
   const [sortDirection, setSortDirection] = useState<SortDirection>("newest");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const inventoryOptions = useMemo(
-    () =>
-      Array.from(
-        new Set(
-          orders
-            .map((order) => order.inventorySize)
-            .filter((value): value is string => typeof value === "string" && value.length > 0)
-        )
-      ).sort(),
-    [orders]
-  );
+  async function clearAllDemoData() {
+    const shouldReset = window.confirm("Reset all demo bookings? This cannot be undone.");
+    if (!shouldReset) return;
+
+    setLoading(true);
+    setError(null);
+
+    try {
+      const response = await fetch("/api/orders", { method: "DELETE" });
+      const data = (await response.json()) as { success?: boolean; error?: string };
+
+      if (!response.ok || !data.success) {
+        throw new Error(data.error ?? "Failed to clear demo bookings.");
+      }
+
+      setOrders([]);
+    } catch (clearError) {
+      setError(clearError instanceof Error ? clearError.message : "Failed to clear demo bookings.");
+    } finally {
+      setLoading(false);
+    }
+  }
 
   useEffect(() => {
     let active = true;
@@ -206,11 +262,11 @@ export default function OrdersDashboard() {
 
   const visibleOrders = useMemo(() => {
     const normalizedSearch = searchQuery.trim().toLowerCase();
-    const normalizedMoveDateFilter = moveDateFilter.trim().toLowerCase();
+    const fromDate = moveDateFrom ? new Date(`${moveDateFrom}T00:00:00`) : null;
+    const toDate = moveDateTo ? new Date(`${moveDateTo}T23:59:59`) : null;
 
     const filteredOrders = orders.filter((order) => {
       const matchesStatus = statusFilter === "all" || order.status === statusFilter;
-      const matchesInventory = inventoryFilter === "all" || order.inventorySize === inventoryFilter;
       const searchHaystack = [
         order.customer.name,
         order.displayId,
@@ -219,10 +275,25 @@ export default function OrdersDashboard() {
         .join(" ")
         .toLowerCase();
       const matchesSearch = !normalizedSearch || searchHaystack.includes(normalizedSearch);
-      const matchesMoveDate =
-        !normalizedMoveDateFilter || (order.moveDate ?? "").toLowerCase().includes(normalizedMoveDateFilter);
+      let matchesMoveDateRange = true;
 
-      return matchesStatus && matchesInventory && matchesSearch && matchesMoveDate;
+      if (fromDate || toDate) {
+        const orderDate = order.moveDate ? new Date(order.moveDate) : null;
+
+        if (!orderDate || Number.isNaN(orderDate.getTime())) {
+          matchesMoveDateRange = false;
+        } else {
+          if (fromDate && orderDate < fromDate) {
+            matchesMoveDateRange = false;
+          }
+
+          if (toDate && orderDate > toDate) {
+            matchesMoveDateRange = false;
+          }
+        }
+      }
+
+      return matchesStatus && matchesSearch && matchesMoveDateRange;
     });
 
     return [...filteredOrders].sort((firstOrder, secondOrder) => {
@@ -231,34 +302,37 @@ export default function OrdersDashboard() {
 
       return sortDirection === "newest" ? secondTime - firstTime : firstTime - secondTime;
     });
-  }, [inventoryFilter, moveDateFilter, orders, searchQuery, sortDirection, statusFilter]);
+  }, [moveDateFrom, moveDateTo, orders, searchQuery, sortDirection, statusFilter]);
 
   const metrics = useMemo(() => {
+    const confirmedCount = orders.filter((order) => order.status === "confirmed").length;
     const pendingCount = orders.filter((order) => order.status === "pending").length;
     const leadCount = orders.filter((order) => order.status === "lead-follow-up").length;
-    const totalRevenue = orders.reduce((sum, order) => sum + order.price, 0);
+    const totalRevenue = orders
+      .filter((order) => order.status === "confirmed")
+      .reduce((sum, order) => sum + order.price, 0);
 
     return [
       {
-        label: "Active orders",
-        value: String(orders.length),
+        label: "Active Orders",
+        value: String(confirmedCount),
         tone: "from-[#DBEAFE] to-white text-[#1D4ED8]",
         icon: <ClipboardIcon />,
       },
       {
-        label: "Pending dispatch",
+        label: "Pending Dispatch",
         value: String(pendingCount),
         tone: "from-[#FFEDD5] to-white text-[#C2410C]",
         icon: <ClockIcon />,
       },
       {
-        label: "Follow-up leads",
+        label: "Follow-up Leads",
         value: String(leadCount),
         tone: "from-[#F3E8FF] to-white text-[#7C3AED]",
         icon: <CheckCircleIcon />,
       },
       {
-        label: "Booked revenue",
+        label: "Total Revenue",
         value: formatCurrency(totalRevenue),
         tone: "from-[#E0F2FE] to-white text-[#0369A1]",
         icon: <BanknotesIcon />,
@@ -283,7 +357,16 @@ export default function OrdersDashboard() {
           </div>
 
           <div className="flex w-full flex-col gap-3 xl:w-[420px]">
-            <div className="grid gap-3 sm:grid-cols-2">
+            <div className="flex justify-end">
+              <button
+                type="button"
+                onClick={() => void clearAllDemoData()}
+                className="rounded-full border border-red-300 bg-transparent px-4 py-2 text-xs font-semibold uppercase tracking-[0.16em] text-red-100 transition hover:border-red-200 hover:bg-red-500/20 hover:text-white"
+              >
+                Clear All Demo Data
+              </button>
+            </div>
+            <div className="grid grid-cols-2 gap-3">
               {metrics.map((metric) => (
                 <div
                   key={metric.label}
@@ -305,18 +388,62 @@ export default function OrdersDashboard() {
         </div>
       </div>
 
+      <section className="mt-6 w-full rounded-[28px] border border-slate-200 bg-white p-5 shadow-sm sm:p-6">
+        <h2 className="text-xl font-semibold tracking-tight text-slate-900 sm:text-2xl">
+          What You Get With Our AI System
+        </h2>
+
+        <div className="mt-5 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+          {aiSystemFeatures.map((feature) => (
+            <article
+              key={feature.title}
+              className="rounded-2xl border border-slate-200 bg-slate-50/60 p-4"
+            >
+              <div className="flex items-start gap-3">
+                <span
+                  aria-hidden="true"
+                  className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-slate-200 bg-white text-base"
+                >
+                  {feature.icon}
+                </span>
+                <div>
+                  <h3 className="text-sm font-semibold text-slate-900 sm:text-base">
+                    {feature.title}
+                  </h3>
+                  <p className="mt-2 text-xs leading-5 text-slate-600 sm:text-sm">
+                    {feature.description}
+                  </p>
+                </div>
+              </div>
+            </article>
+          ))}
+        </div>
+
+        <div className="mt-6 text-center">
+          <p className="text-xs font-medium text-slate-500 sm:text-sm">
+            Setup takes less than 7 days. No technical knowledge required.
+          </p>
+          <a
+            href="mailto:hello@vanturo.com"
+            className="mt-3 inline-flex items-center justify-center rounded-full bg-slate-900 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-slate-800"
+          >
+            Get This For Your Moving Company →
+          </a>
+        </div>
+      </section>
+
       <div className="mt-6 flex flex-col gap-4 rounded-[28px] border border-slate-200 bg-slate-50/70 p-4 sm:p-5 lg:flex-row lg:items-end lg:justify-between">
         <div>
           <p className="text-sm font-semibold uppercase tracking-[0.2em] text-slate-500">
             Filter orders
           </p>
           <p className="mt-2 text-sm text-slate-600">
-            Search by customer name or order ID, then narrow the queue by status, move date, and inventory type.
+            Search by customer or Order ID, then filter by status and move-date range.
           </p>
         </div>
 
         <div className="grid gap-3 md:grid-cols-2 xl:min-w-[680px] xl:grid-cols-4">
-          <label className="flex flex-col gap-2 text-sm text-slate-600 md:col-span-2 xl:col-span-1">
+          <label className="flex flex-col gap-2 text-sm text-slate-600 md:col-span-2 xl:col-span-2">
             Search
             <input
               type="search"
@@ -328,47 +455,24 @@ export default function OrdersDashboard() {
           </label>
 
           <label className="flex flex-col gap-2 text-sm text-slate-600">
-            Status
-            <select
-              value={statusFilter}
-              onChange={(event) =>
-                setStatusFilter(event.target.value as "all" | DashboardOrder["status"])
-              }
-              className="rounded-2xl border border-slate-300 bg-white px-4 py-3 text-sm font-medium text-slate-900 outline-none transition focus:border-slate-500"
-            >
-              <option value="all">All</option>
-              <option value="pending">Pending</option>
-              <option value="confirmed">Confirmed</option>
-              <option value="completed">Completed</option>
-              <option value="lead-follow-up">Lead Follow Up</option>
-            </select>
-          </label>
-
-          <label className="flex flex-col gap-2 text-sm text-slate-600">
-            Move date
+            Move date from
             <input
-              type="search"
-              value={moveDateFilter}
-              onChange={(event) => setMoveDateFilter(event.target.value)}
-              placeholder="This week or May 20"
+              type="date"
+              value={moveDateFrom}
+              onChange={(event) => setMoveDateFrom(event.target.value)}
               className="rounded-2xl border border-slate-300 bg-white px-4 py-3 text-sm font-medium text-slate-900 outline-none transition focus:border-slate-500"
             />
           </label>
 
           <label className="flex flex-col gap-2 text-sm text-slate-600">
-            Inventory
-            <select
-              value={inventoryFilter}
-              onChange={(event) => setInventoryFilter(event.target.value)}
+            Move date to
+            <input
+              type="date"
+              value={moveDateTo}
+              min={moveDateFrom || undefined}
+              onChange={(event) => setMoveDateTo(event.target.value)}
               className="rounded-2xl border border-slate-300 bg-white px-4 py-3 text-sm font-medium text-slate-900 outline-none transition focus:border-slate-500"
-            >
-              <option value="all">All sizes</option>
-              {inventoryOptions.map((option) => (
-                <option key={option} value={option}>
-                  {option}
-                </option>
-              ))}
-            </select>
+            />
           </label>
 
           <label className="flex flex-col gap-2 text-sm text-slate-600">
@@ -383,6 +487,37 @@ export default function OrdersDashboard() {
             </select>
           </label>
         </div>
+      </div>
+
+      <div className="mt-4 flex flex-wrap gap-2">
+        <button
+          type="button"
+          onClick={() => setStatusFilter("all")}
+          className={`min-h-11 rounded-full px-4 py-2.5 text-[11px] font-semibold uppercase tracking-[0.14em] ring-1 transition sm:min-h-10 sm:py-2 sm:text-xs ${statusFilter === "all" ? "bg-slate-900 text-white ring-slate-900" : "bg-white text-slate-700 ring-slate-300 hover:bg-slate-50"}`}
+        >
+          All
+        </button>
+        <button
+          type="button"
+          onClick={() => setStatusFilter("confirmed")}
+          className={`min-h-11 rounded-full px-4 py-2.5 text-[11px] font-semibold uppercase tracking-[0.14em] ring-1 transition sm:min-h-10 sm:py-2 sm:text-xs ${statusFilter === "confirmed" ? "bg-emerald-700 text-white ring-emerald-700" : "bg-white text-slate-700 ring-slate-300 hover:bg-slate-50"}`}
+        >
+          Confirmed
+        </button>
+        <button
+          type="button"
+          onClick={() => setStatusFilter("lead-follow-up")}
+          className={`min-h-11 rounded-full px-4 py-2.5 text-[11px] font-semibold uppercase tracking-[0.14em] ring-1 transition sm:min-h-10 sm:py-2 sm:text-xs ${statusFilter === "lead-follow-up" ? "bg-amber-600 text-white ring-amber-600" : "bg-white text-slate-700 ring-slate-300 hover:bg-slate-50"}`}
+        >
+          Follow Up
+        </button>
+        <button
+          type="button"
+          onClick={() => setStatusFilter("pending")}
+          className={`min-h-11 rounded-full px-4 py-2.5 text-[11px] font-semibold uppercase tracking-[0.14em] ring-1 transition sm:min-h-10 sm:py-2 sm:text-xs ${statusFilter === "pending" ? "bg-sky-700 text-white ring-sky-700" : "bg-white text-slate-700 ring-slate-300 hover:bg-slate-50"}`}
+        >
+          Pending Dispatch
+        </button>
       </div>
 
       {loading ? (
@@ -423,6 +558,8 @@ export default function OrdersDashboard() {
                   <div>
                     <p className="text-[11px] font-semibold uppercase tracking-[0.15em] text-slate-400">{order.displayId ?? order.id.slice(-8).toUpperCase()}</p>
                     <p className="text-lg font-semibold text-slate-900">{order.customer.name}</p>
+                    <p className="mt-1 text-sm text-slate-600">{order.customer.phone}</p>
+                    <p className="text-sm text-slate-600">{order.customer.email ?? "No email"}</p>
                     <p className="mt-1 text-sm text-slate-600">Booked {formatDate(order.createdAt)}</p>
                   </div>
 
@@ -436,7 +573,20 @@ export default function OrdersDashboard() {
                   </span>
                 </div>
 
-                <div className="mt-5 grid gap-4 sm:grid-cols-2">
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {order.reminderCall ? (
+                    <span className="rounded-full bg-slate-100 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-600 ring-1 ring-slate-200">
+                      📞 Reminder
+                    </span>
+                  ) : null}
+                  {order.afterHours ? (
+                    <span className="rounded-full bg-indigo-50 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-indigo-700 ring-1 ring-indigo-200">
+                      🌙 After Hours
+                    </span>
+                  ) : null}
+                </div>
+
+                <div className="mt-5 grid gap-4">
                   <div className={[
                     "rounded-2xl p-4 backdrop-blur-sm",
                     cardTheme.panel,
@@ -497,6 +647,8 @@ export default function OrdersDashboard() {
                   <th className="px-5 py-4 font-semibold">Order ID</th>
                   <th className="px-5 py-4 font-semibold">Customer</th>
                   <th className="px-5 py-4 font-semibold">Route</th>
+                  <th className="px-5 py-4 font-semibold">Inventory</th>
+                  <th className="px-5 py-4 font-semibold">Add-ons</th>
                   <th className="px-5 py-4 font-semibold">Move date</th>
                   <th className="px-5 py-4 font-semibold">Price</th>
                   <th className="px-5 py-4 font-semibold">Status</th>
@@ -506,7 +658,7 @@ export default function OrdersDashboard() {
               <tbody className="divide-y divide-slate-200 bg-white text-slate-700">
                 {visibleOrders.length === 0 ? (
                   <tr>
-                    <td colSpan={7} className="px-5 py-10 text-center text-slate-500">
+                    <td colSpan={9} className="px-5 py-10 text-center text-slate-500">
                       No orders found.
                     </td>
                   </tr>
@@ -519,9 +671,33 @@ export default function OrdersDashboard() {
                     className="cursor-pointer transition hover:bg-slate-50"
                   >
                     <td className="px-5 py-5 font-mono text-sm font-semibold text-slate-700">{order.displayId ?? order.id.slice(-8).toUpperCase()}</td>
-                    <td className="px-5 py-5 font-medium text-slate-900">{order.customer.name}</td>
+                    <td className="px-5 py-5 font-medium text-slate-900">
+                      <div className="space-y-2">
+                        <p>{order.customer.name}</p>
+                        <p className="text-xs text-slate-500">{order.customer.phone}</p>
+                        <p className="text-xs text-slate-500">{order.customer.email ?? "No email"}</p>
+                        <div className="flex flex-wrap gap-2">
+                          {order.reminderCall ? (
+                            <span className="rounded-full bg-slate-100 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-600 ring-1 ring-slate-200">
+                              📞 Reminder
+                            </span>
+                          ) : null}
+                          {order.afterHours ? (
+                            <span className="rounded-full bg-indigo-50 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-indigo-700 ring-1 ring-indigo-200">
+                              🌙 After Hours
+                            </span>
+                          ) : null}
+                        </div>
+                      </div>
+                    </td>
                     <td className="px-5 py-5">
                       {formatLocation(order.pickup)} {"->"} {formatLocation(order.dropoff)}
+                    </td>
+                    <td className="px-5 py-5">{order.inventorySize ?? "Not set"}</td>
+                    <td className="px-5 py-5">
+                      {order.selectedAddOns?.length
+                        ? formatSelectedAddOns(order.selectedAddOns)
+                        : "None"}
                     </td>
                     <td className="px-5 py-5">{order.moveDate ?? "Not set"}</td>
                     <td className="px-5 py-5 font-semibold text-slate-900">

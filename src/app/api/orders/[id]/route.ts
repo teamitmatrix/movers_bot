@@ -37,6 +37,8 @@ function serializeOrder(order: OrderDocument & { _id: { toString(): string } }) 
     originalPrice: order.originalPrice ?? null,
     discountApplied: order.discountApplied ?? false,
     discountAmount: order.discountAmount ?? 0,
+    reminderCall: order.reminderCall ?? null,
+    afterHours: order.afterHours ?? false,
     customer: order.customer,
     moveDate: order.moveDate ?? null,
     inventorySize: order.inventorySize ?? null,
@@ -87,20 +89,33 @@ export async function PATCH(
 
     const body = await request.json().catch(() => {
       throw new ApiError(400, "Request body must be valid JSON.");
-    }) as { status?: OrderStatus };
+    }) as { status?: OrderStatus; reminderCall?: boolean };
 
-    if (!body.status || !VALID_STATUSES.includes(body.status)) {
-      return NextResponse.json(
-        { error: "status must be one of: pending, confirmed, completed, lead-follow-up." },
-        { status: 400 }
-      );
+    if (body.status === undefined && body.reminderCall === undefined) {
+      return NextResponse.json({ error: "Provide status and/or reminderCall to update." }, { status: 400 });
+    }
+
+    if (body.status !== undefined && !VALID_STATUSES.includes(body.status)) {
+      return NextResponse.json({ error: "status must be one of: pending, confirmed, completed, lead-follow-up." }, { status: 400 });
+    }
+
+    if (body.reminderCall !== undefined && typeof body.reminderCall !== "boolean") {
+      return NextResponse.json({ error: "reminderCall must be a boolean." }, { status: 400 });
     }
 
     await connectToDatabase();
 
+    const updatePayload: { status?: OrderStatus; reminderCall?: boolean } = {};
+    if (body.status !== undefined) {
+      updatePayload.status = body.status;
+    }
+    if (body.reminderCall !== undefined) {
+      updatePayload.reminderCall = body.reminderCall;
+    }
+
     const order = await Order.findByIdAndUpdate(
       id,
-      { status: body.status },
+      updatePayload,
       { new: true, runValidators: true }
     ).lean();
 
@@ -108,7 +123,7 @@ export async function PATCH(
       return NextResponse.json({ error: "Order not found." }, { status: 404 });
     }
 
-    logger.info("Order status updated", { orderId: id, status: body.status });
+    logger.info("Order updated", { orderId: id, status: body.status, reminderCall: body.reminderCall });
 
     return NextResponse.json({
       order: serializeOrder(order as OrderDocument & { _id: { toString(): string } }),

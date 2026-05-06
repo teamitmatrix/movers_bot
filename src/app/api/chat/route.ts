@@ -35,6 +35,8 @@ type BookingDetails = {
   selectedAddOns?: ServiceAddOnId[];
   upsellReviewed?: boolean;
   discountApplied?: boolean;
+  reminderCall?: boolean;
+  afterHoursSession?: boolean;
   moveDate?: string;
   inventorySize?: string;
   leadCaptured?: boolean;
@@ -55,17 +57,25 @@ type StructuredResponse = {
     | {
         type: "lead-capture";
       }
+    | {
+        type: "quick-replies";
+        options: string[];
+      }
     | null;
   order:
     | {
+        recordId?: string;
         id: string;
         status: string;
         totalPrice: number;
         selectedAddOns?: ServiceAddOnId[];
         discountApplied?: boolean;
         discountAmount?: number;
+        reminderCall?: boolean;
+        afterHours?: boolean;
         pickupZip?: string;
         dropoffZip?: string;
+        items?: PricingItem[];
         moveDate?: string;
         inventorySize?: string;
         customerName?: string;
@@ -94,6 +104,75 @@ const PRICE_OBJECTION_RE = /\b(too expensive|that's a lot|too much|can you do be
 const MAYBE_LATER_RE = /\b(let me think|i'?ll get back|not sure|maybe later)\b/i;
 const INSURANCE_RE = /\b(do you have insurance|are you insured|licensed)\b/i;
 const TIMING_RE = /\b(how long|how many hours|time)\b/i;
+const GREETING_RE = /^(hi|hello|hey|good morning|good afternoon|good evening|hola|yo)\b/i;
+const SERVICES_INFO_RE = /\b(services?|offer|provide|do you do|can you handle)\b/i;
+const QUESTION_START_RE = /^(what|who|when|where|why|how|is|are|can|could|do|does|did|will|would|should)\b/i;
+const COST_INQUIRY_RE = /\b(cost|price|total|amount|how much)\b/i;
+const MOVING_SCOPE_RE = /\b(move|moving|mover|movers|service|services|quote|book|booking|pickup|dropoff|zip|route|items?|boxes|bed|sofa|wardrobe|appliance|piano|packing|packaging|unpacking|storage|disassembly|crew|truck|local|long-distance|long distance|cross-country|across the country|commercial|office|insured|license|fmcsa|payment|reschedule|cancel|order|oid-\d+|status)\b/i;
+const SAME_DAY_RE = /\b(same[ -]?day|today)\b/i;
+const SPECIALTY_ITEMS_RE = /\b(piano|pianos|antique|antiques|specialty items?|fragile items?)\b/i;
+const PAYMENT_METHODS_RE = /\b(payment methods?|pay(?:ment)?|credit cards?|cash|zelle)\b/i;
+const PACKING_RE = /\b(pack(?:ing|aging)?|unpack(?:ing)?|packing services?)\b/i;
+const STORAGE_RE = /\b(storage|climate[- ]controlled)\b/i;
+const RESCHEDULE_OR_CANCEL_RE = /\b(reschedule|cancel(?:lation)?|cancellations?)\b/i;
+const ORDER_ID_RE = /\bOID-\d+\b/i;
+const FAQ_ADJUSTMENT_CONFIRM_RE = /\b(yes|yeah|yep|sure|please|okay|ok|go ahead|do it|sounds good|add it|add that|include it|include that|check availability)\b/i;
+const CONTINUE_BOOKING_OPTIONS = ["Continue Booking", "Ask Something Else"] as const;
+const ORDER_ACTION_OPTIONS = [
+  "Reschedule",
+  "Cancel Booking",
+  "Check Status",
+] as const;
+
+type FaqResponse = {
+  assistantMessage: string;
+  quickReplies: string[];
+};
+
+const SAME_DAY_FAQ_MESSAGE = "We do offer same-day moves based on crew availability! There's a $50 same-day fee. Want me to check availability for your route?";
+const SPECIALTY_FAQ_MESSAGE = "Yes! We have specialty crews for pianos, antiques, and fragile items. There's an additional handling fee starting at $100. Shall I include that in your quote?";
+const PACKING_FAQ_MESSAGE = "Yes, we provide full and partial packing/unpacking services. Professional packing starts at $150 and includes materials plus careful handling for fragile items. Want me to include packing in your quote?";
+const STORAGE_FAQ_MESSAGE = "Yes, we have climate-controlled storage units available. Short-term (1-30 days) starts at $99/month. Want me to add that to your booking?";
+const OUT_OF_SCOPE_REPLY = "Sorry, I can't help with that, if you are looking for moving service I can book your move.";
+const GREETING_REPLY = "Hello! Welcome to Vanturo Moving. Would you like to book a new move or check an existing booking?";
+const SERVICES_REPLY = "We provide local and long-distance moving across the country, plus packing, storage, furniture moving, and commercial moving services. If you want, I can help you book a move now or check an existing booking with your Order ID (like OID-101).";
+
+function isGreetingMessage(message: string) {
+  const trimmed = message.trim();
+  if (!trimmed) return false;
+
+  const words = trimmed.split(/\s+/).length;
+  return words <= 8 && GREETING_RE.test(trimmed);
+}
+
+function looksLikeQuestion(message: string) {
+  const trimmed = message.trim();
+  if (!trimmed) return false;
+  return trimmed.includes("?") || QUESTION_START_RE.test(trimmed.toLowerCase());
+}
+
+function isMovingScopeMessage(message: string) {
+  return MOVING_SCOPE_RE.test(message.trim().toLowerCase());
+}
+
+function hasBookingContext(details: BookingDetails) {
+  return Boolean(
+    details.pickupZip ||
+    details.dropoffZip ||
+    details.items.length > 0 ||
+    details.inventorySize ||
+    details.moveDate
+  );
+}
+
+function parseOrderNumberFromOrderId(orderId: string) {
+  const match = orderId.match(/^OID-(\d+)$/i);
+  if (!match) {
+    return null;
+  }
+
+  return Number.parseInt(match[1], 10);
+}
 
 function buildSystemPrompt(quoteAlreadyGiven: boolean): string {
   const companyContext = `
@@ -127,6 +206,9 @@ TONE RULES (NEVER break these):
 - Never sound robotic or like a form
 - Never repeat yourself or re-summarize the quote unprompted
 - Never force the booking flow into a casual conversation
+- You must ONLY answer questions related to moving services, moving bookings, or order support
+- If the user asks an unrelated question, reply exactly: "Sorry, I can't help with that, if you are looking for moving service I can book your move."
+- For greetings (hi/hello/etc), warmly welcome them and ask whether they want to book a new move or check an existing booked move
 `;
 
   if (quoteAlreadyGiven) {
@@ -159,22 +241,30 @@ WHAT NOT TO DO:
 CURRENT STATE: No quote given yet.
 
 YOUR ROLE NOW:
-Collect 3 pieces of info to generate a quote. Ask ONE question at a time.
+You are guiding the customer step-by-step to get a moving quote. Be warm, natural, and helpful — like a real human agent on chat. Answer any questions they have, then continue the booking.
 
-COLLECTION ORDER:
-1. Pickup ZIP code
-2. Dropoff ZIP code
-3. What they're moving (home size or item description)
+STRICT STEP ORDER (follow this exactly, ONE step at a time):
+Step 1 → If pickup ZIP is not yet known: ask "What's your pickup ZIP code?"
+Step 2 → If dropoff ZIP is not yet known: ask "Got it — and what's the dropoff ZIP?"
+Step 3 → Once BOTH ZIP codes are confirmed: reply with a brief, natural confirmation like "Perfect, I have your route set!" then STOP. The booking interface will automatically present home-size options, item details, and add-on services to the customer. You do not need to ask for those.
 
-Once all 3 are collected → call calculate_price immediately.
-After the quote is shown → say ONCE: "To confirm your booking, fill in the form below."
-Then switch to natural conversation mode — do NOT keep pushing the form.
+CALCULATE PRICE WHEN:
+- BOTH a pickup ZIP and a dropoff ZIP appear in the conversation, AND
+- The customer has listed items (e.g. "1 sofa, 2 beds, 10 boxes") in their messages
+→ In that case: call calculate_price immediately. Do NOT ask any further questions first.
+
+HANDLING QUESTIONS:
+- If the customer asks ANYTHING at any point, answer it naturally and helpfully
+- After answering, continue from where you left off in the step order
+- Never ignore a question — always acknowledge it
+- You are an intelligent agent, not just a form-filler
 
 WHAT NOT TO DO:
-- Do NOT ask for name/phone/email (the form handles that)
+- Do NOT ask for items, home size, move date, or add-on services — the UI handles those steps
+- Do NOT ask for name/phone/email — the contact form handles that
 - Do NOT calculate or guess prices yourself — always use calculate_price tool
-- Do NOT ask for ZIP codes if the customer is just chatting casually
 - Do NOT ask multiple questions at once
+- Do NOT say "fill in the form" unprompted
 `;
 }
 
@@ -234,6 +324,185 @@ function formatMoveTiming(distance: number) {
 
 function getLastUserMessage(messages: IncomingMessage[]) {
   return [...messages].reverse().find((message) => message.role === "user") ?? null;
+}
+
+function getLatestOrderId(messages: IncomingMessage[]) {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const match = messages[index]?.content.match(ORDER_ID_RE);
+
+    if (match) {
+      return match[0].toUpperCase();
+    }
+  }
+
+  return null;
+}
+
+function appendFaqClosing(message: string) {
+  return `${message}\n\nIs there anything else you'd like to know, or shall we continue with your quote?`;
+}
+
+function getPreviousAssistantMessage(messages: IncomingMessage[]) {
+  for (let index = messages.length - 2; index >= 0; index -= 1) {
+    if (messages[index]?.role === "assistant") {
+      return messages[index]?.content ?? null;
+    }
+  }
+
+  return null;
+}
+
+function addUniqueAddOn(addOnIds: ServiceAddOnId[] = [], addOnId: ServiceAddOnId) {
+  return addOnIds.includes(addOnId) ? addOnIds : [...addOnIds, addOnId];
+}
+
+function getPendingFaqAdjustment(
+  messages: IncomingMessage[],
+  userMessage: string
+): ServiceAddOnId | null {
+  if (!FAQ_ADJUSTMENT_CONFIRM_RE.test(userMessage.trim())) {
+    return null;
+  }
+
+  const previousAssistantMessage = getPreviousAssistantMessage(messages);
+
+  if (!previousAssistantMessage) {
+    return null;
+  }
+
+  if (previousAssistantMessage.includes(SAME_DAY_FAQ_MESSAGE)) {
+    return "same-day-service";
+  }
+
+  if (previousAssistantMessage.includes(SPECIALTY_FAQ_MESSAGE)) {
+    return "specialty-item-handling";
+  }
+
+  if (previousAssistantMessage.includes(STORAGE_FAQ_MESSAGE)) {
+    return "storage-unit-30-days";
+  }
+
+  return null;
+}
+
+function buildQuoteAdjustmentReply(
+  addOnId: ServiceAddOnId,
+  details: BookingDetails,
+  pricingSummary: QuoteAdjustmentSummary | null
+) {
+  const addOnLabel = SERVICE_ADDONS.find((addOn) => addOn.id === addOnId)?.shortLabel ?? addOnId;
+
+  if (pricingSummary) {
+    return appendFaqClosing(
+      `Perfect — I included ${addOnLabel.toLowerCase()} in your quote. Your updated total is ${formatCurrency(pricingSummary.finalTotal)}.`
+    );
+  }
+
+  if (details.pickupZip && details.dropoffZip && details.items.length > 0) {
+    return appendFaqClosing(
+      `Perfect — I included ${addOnLabel.toLowerCase()} in your quote prep. I can finalize the adjusted total as soon as we finish the quote details.`
+    );
+  }
+
+  return appendFaqClosing(
+    `Perfect — I’ll include ${addOnLabel.toLowerCase()} when I prepare your quote.`
+  );
+}
+
+function getGlobalFaqResponse(messages: IncomingMessage[], userMessage: string): FaqResponse | null {
+  const trimmedMessage = userMessage.trim();
+  const latestOrderId = getLatestOrderId(messages);
+  const explicitOrderId = trimmedMessage.match(ORDER_ID_RE)?.[0]?.toUpperCase();
+  const activeOrderId = explicitOrderId ?? latestOrderId;
+
+  if (/\b(check existing booking|existing booking|booked move|already booked)\b/i.test(trimmedMessage)) {
+    return {
+      assistantMessage: "Absolutely. Please share your Order ID (for example, OID-101), and I can help with status, rescheduling, or cancellation.",
+      quickReplies: [...ORDER_ACTION_OPTIONS],
+    };
+  }
+
+  if (explicitOrderId) {
+    return {
+      assistantMessage: appendFaqClosing(
+        `Got it! I found your booking ${explicitOrderId}. Would you like to reschedule, cancel, or just check your status?`
+      ),
+      quickReplies: [...ORDER_ACTION_OPTIONS],
+    };
+  }
+
+  if (activeOrderId && /^reschedule$/i.test(trimmedMessage)) {
+    return {
+      assistantMessage: appendFaqClosing(
+        `Absolutely. For this demo, I've marked ${activeOrderId} for reschedule review and a coordinator will confirm your new preferred date shortly.`
+      ),
+      quickReplies: [...CONTINUE_BOOKING_OPTIONS],
+    };
+  }
+
+  if (activeOrderId && /^cancel booking$/i.test(trimmedMessage)) {
+    return {
+      assistantMessage: appendFaqClosing(
+        `No problem. For this demo, ${activeOrderId} is marked for cancellation review and our team will send a confirmation shortly.`
+      ),
+      quickReplies: [...CONTINUE_BOOKING_OPTIONS],
+    };
+  }
+
+  if (activeOrderId && /^check status$/i.test(trimmedMessage)) {
+    return {
+      assistantMessage: `Sure thing. For this demo, ${activeOrderId} is active and waiting for final crew confirmation.`,
+      quickReplies: [],
+    };
+  }
+
+  if (SAME_DAY_RE.test(trimmedMessage)) {
+    return {
+      assistantMessage: appendFaqClosing(SAME_DAY_FAQ_MESSAGE),
+      quickReplies: [...CONTINUE_BOOKING_OPTIONS],
+    };
+  }
+
+  if (SPECIALTY_ITEMS_RE.test(trimmedMessage)) {
+    return {
+      assistantMessage: appendFaqClosing(SPECIALTY_FAQ_MESSAGE),
+      quickReplies: [...CONTINUE_BOOKING_OPTIONS],
+    };
+  }
+
+  if (PAYMENT_METHODS_RE.test(trimmedMessage)) {
+    return {
+      assistantMessage: appendFaqClosing(
+        "We accept all major credit cards, cash, and Zelle. Payment is due on move day after everything is delivered."
+      ),
+      quickReplies: [...CONTINUE_BOOKING_OPTIONS],
+    };
+  }
+
+  if (PACKING_RE.test(trimmedMessage)) {
+    return {
+      assistantMessage: appendFaqClosing(PACKING_FAQ_MESSAGE),
+      quickReplies: [...CONTINUE_BOOKING_OPTIONS],
+    };
+  }
+
+  if (STORAGE_RE.test(trimmedMessage)) {
+    return {
+      assistantMessage: appendFaqClosing(STORAGE_FAQ_MESSAGE),
+      quickReplies: [...CONTINUE_BOOKING_OPTIONS],
+    };
+  }
+
+  if (RESCHEDULE_OR_CANCEL_RE.test(trimmedMessage)) {
+    return {
+      assistantMessage: appendFaqClosing(
+        "Absolutely. Cancellations are free up to 48 hours before your move. To reschedule, just reply here with your Order ID (format: OID-101) and your new preferred date."
+      ),
+      quickReplies: [...CONTINUE_BOOKING_OPTIONS],
+    };
+  }
+
+  return null;
 }
 const TOOLS = [
   {
@@ -521,6 +790,18 @@ function normalizeBookingDetails(args: Record<string, unknown>): BookingDetails 
         : typeof args.discountApplied === "boolean"
           ? args.discountApplied
           : undefined,
+    reminderCall:
+      typeof args.reminder_call === "boolean"
+        ? args.reminder_call
+        : typeof args.reminderCall === "boolean"
+          ? args.reminderCall
+          : undefined,
+    afterHoursSession:
+      typeof args.after_hours_session === "boolean"
+        ? args.after_hours_session
+        : typeof args.afterHoursSession === "boolean"
+          ? args.afterHoursSession
+          : undefined,
     customerName:
       typeof args.customer_name === "string"
         ? args.customer_name
@@ -571,6 +852,8 @@ function mergeBookingDetails(primary: BookingDetails | null, secondary: BookingD
         : secondary.selectedAddOns,
     upsellReviewed: primary?.upsellReviewed ?? secondary.upsellReviewed,
     discountApplied: primary?.discountApplied ?? secondary.discountApplied,
+    reminderCall: primary?.reminderCall ?? secondary.reminderCall,
+    afterHoursSession: primary?.afterHoursSession ?? secondary.afterHoursSession,
     moveDate: primary?.moveDate ?? secondary.moveDate,
     inventorySize: primary?.inventorySize ?? secondary.inventorySize,
     leadCaptured: primary?.leadCaptured ?? secondary.leadCaptured,
@@ -612,17 +895,23 @@ function buildFallbackAssistantMessage(details: BookingDetails, structuredData: 
       return "Please fill in the contact form above to confirm your booking.";
     }
     const itemSummary = details.items.map((item) => `${item.quantity}x ${item.type}`).join(", ");
-    const total = structuredData.priceQuote.totalPrice.toLocaleString("en-US", { style: "currency", currency: "USD" });
-    return `Quote ready — ${total}\nPickup: ${details.pickupZip} → Dropoff: ${details.dropoffZip}\nItems: ${itemSummary}\n\nTo confirm your booking, please fill in the form below.`;
+    const total = (structuredData.pricingSummary?.finalTotal ?? structuredData.priceQuote.totalPrice).toLocaleString("en-US", { style: "currency", currency: "USD" });
+    const includedAddOns = structuredData.pricingSummary?.selectedAddOns.map((addOn) => addOn.shortLabel) ?? [];
+    const addOnLine = includedAddOns.length > 0 ? `\nIncluded: ${includedAddOns.join(", ")}` : "";
+    return `Quote ready — ${total}\nPickup: ${details.pickupZip} → Dropoff: ${details.dropoffZip}\nItems: ${itemSummary}${addOnLine}`;
   }
 
   const missingQuoteFields = getMissingQuoteFields(details);
 
   if (missingQuoteFields.length > 0) {
-    if (missingQuoteFields.includes("items")) {
-      return "What items are you moving? Example: 1 sofa, 2 beds, 10 boxes.";
+    if (missingQuoteFields.includes("pickup_zip")) {
+      return "What's your pickup ZIP code?";
     }
-    return "Please share your pickup ZIP, dropoff ZIP, and the items you need moved.";
+    if (missingQuoteFields.includes("dropoff_zip")) {
+      return "Got it — and what's the dropoff ZIP code?";
+    }
+    // Both ZIPs present but items not yet provided — UI will show options
+    return "I have your route. Let me pull up your options now.";
   }
 
   return "Calculating your quote now\u2026";
@@ -719,6 +1008,8 @@ async function createOrder(details: BookingDetails, status: "confirmed" | "lead-
     originalPrice: pricingSummary.subtotal,
     discountApplied: pricingSummary.discountApplied,
     discountAmount: pricingSummary.discountAmount,
+    reminderCall: details.reminderCall,
+    afterHours: details.afterHoursSession ?? false,
     moveDate: details.moveDate,
     inventorySize: details.inventorySize,
     price: pricingSummary.finalTotal,
@@ -730,14 +1021,18 @@ async function createOrder(details: BookingDetails, status: "confirmed" | "lead-
 
   return {
     order: {
+      recordId: doc._id.toString(),
       id: formatOrderId(doc.orderNumber),
       status: doc.status,
       totalPrice: pricingSummary.finalTotal,
       selectedAddOns: details.selectedAddOns,
       discountApplied: pricingSummary.discountApplied,
       discountAmount: pricingSummary.discountAmount,
+      reminderCall: details.reminderCall,
+      afterHours: details.afterHoursSession ?? false,
       pickupZip: details.pickupZip,
       dropoffZip: details.dropoffZip,
+      items: details.items,
       moveDate: details.moveDate,
       inventorySize: details.inventorySize,
       customerName: details.customerName,
@@ -765,6 +1060,8 @@ function cloneStoredBookingDetails(details: PartialBookingData | null | undefine
     selectedAddOns: details.selectedAddOns ? [...details.selectedAddOns] : [],
     upsellReviewed: details.upsellReviewed,
     discountApplied: details.discountApplied,
+    reminderCall: details.reminderCall,
+    afterHoursSession: details.afterHoursSession,
     moveDate: details.moveDate,
     inventorySize: details.inventorySize,
     leadCaptured: details.leadCaptured,
@@ -822,13 +1119,23 @@ export async function POST(request: Request) {
         typeof rawBookingProgress.discountApplied === "boolean"
           ? rawBookingProgress.discountApplied
           : undefined;
+      const reminderCall =
+        typeof rawBookingProgress.reminderCall === "boolean"
+          ? rawBookingProgress.reminderCall
+          : undefined;
+      const afterHoursSession =
+        typeof rawBookingProgress.afterHoursSession === "boolean"
+          ? rawBookingProgress.afterHoursSession
+          : undefined;
 
       if (
         !moveDate &&
         !inventorySize &&
         selectedAddOns === undefined &&
         upsellReviewed === undefined &&
-        discountApplied === undefined
+        discountApplied === undefined &&
+        reminderCall === undefined &&
+        afterHoursSession === undefined
       ) {
         throw new ApiError(400, "No booking progress details were provided.");
       }
@@ -844,6 +1151,8 @@ export async function POST(request: Request) {
         ...(selectedAddOns !== undefined ? { selectedAddOns } : {}),
         ...(upsellReviewed !== undefined ? { upsellReviewed } : {}),
         ...(discountApplied !== undefined ? { discountApplied } : {}),
+        ...(reminderCall !== undefined ? { reminderCall } : {}),
+        ...(afterHoursSession !== undefined ? { afterHoursSession } : {}),
         ...(moveDate ? { moveDate } : {}),
         ...(inventorySize ? { inventorySize } : {}),
       };
@@ -893,6 +1202,8 @@ export async function POST(request: Request) {
           selectedAddOns: partial.selectedAddOns,
           upsellReviewed: partial.upsellReviewed,
           discountApplied: partial.discountApplied,
+          reminderCall: partial.reminderCall,
+          afterHoursSession: partial.afterHoursSession,
           moveDate: partial.moveDate,
           inventorySize: partial.inventorySize,
           customerName: name,
@@ -983,6 +1294,8 @@ export async function POST(request: Request) {
         selectedAddOns: partial.selectedAddOns,
         upsellReviewed: partial.upsellReviewed,
         discountApplied: partial.discountApplied,
+        reminderCall: partial.reminderCall,
+        afterHoursSession: partial.afterHoursSession,
         moveDate: partial.moveDate,
         inventorySize: partial.inventorySize,
         customerName: name,
@@ -1008,7 +1321,6 @@ export async function POST(request: Request) {
       };
       formSession.status = "booked";
       formSession.orderId = order.id;
-      formSession.messages.push({ role: "assistant", content: confirmMsg, timestamp: new Date() });
       formSession.expiresAt = sessionExpiry();
       await formSession.save();
 
@@ -1114,16 +1426,78 @@ export async function POST(request: Request) {
         structuredData.details,
         inferBookingDetailsFromMessages(messages)
       );
+      const bookingInProgress = hasBookingContext(mergedDetails) && !isBooked;
 
       structuredData.details = mergedDetails;
       structuredData.pricingSummary = getPricingSummary(storedPriceQuote, mergedDetails);
 
       let handledReply: string | null = null;
+      const pendingFaqAdjustment = getPendingFaqAdjustment(messages, lastContent);
 
-      if (PRICE_OBJECTION_RE.test(lastContent) && structuredData.pricingSummary && storedPriceQuote) {
+      if (COST_INQUIRY_RE.test(lastContent)) {
+        const requestedOrderId =
+          lastContent.match(ORDER_ID_RE)?.[0]?.toUpperCase() ?? getLatestOrderId(messages);
+
+        if (requestedOrderId) {
+          const orderNumber = parseOrderNumberFromOrderId(requestedOrderId);
+          if (orderNumber) {
+            const orderDoc = await Order.findOne({ orderNumber }).select("price").lean();
+
+            if (orderDoc && typeof orderDoc.price === "number") {
+              handledReply = appendFaqClosing(
+                `The total cost for ${requestedOrderId} is ${formatCurrency(orderDoc.price)}.`
+              );
+              structuredData.prompt = {
+                type: "quick-replies",
+                options: [...ORDER_ACTION_OPTIONS],
+              };
+            }
+          }
+        }
+      }
+
+      if (!handledReply && isGreetingMessage(lastContent)) {
+        handledReply = bookingInProgress
+          ? appendFaqClosing("Hey! Happy to help.")
+          : GREETING_REPLY;
+        structuredData.prompt = {
+          type: "quick-replies",
+          options: bookingInProgress
+            ? [...CONTINUE_BOOKING_OPTIONS]
+            : ["Book a new move", "Check existing booking"],
+        };
+      } else if (!handledReply && SERVICES_INFO_RE.test(lastContent.toLowerCase()) && isMovingScopeMessage(lastContent)) {
+        handledReply = appendFaqClosing(SERVICES_REPLY);
+        structuredData.prompt = {
+          type: "quick-replies",
+          options: ["Continue Booking", "Check existing booking"],
+        };
+      } else if (!handledReply && looksLikeQuestion(lastContent) && !isMovingScopeMessage(lastContent)) {
+        handledReply = OUT_OF_SCOPE_REPLY;
+      }
+
+      if (!handledReply && pendingFaqAdjustment) {
+        const nextSelectedAddOns = addUniqueAddOn(mergedDetails.selectedAddOns, pendingFaqAdjustment);
+        structuredData.details = {
+          ...mergedDetails,
+          selectedAddOns: nextSelectedAddOns,
+        };
+        structuredData.pricingSummary = getPricingSummary(storedPriceQuote, structuredData.details);
+        handledReply = buildQuoteAdjustmentReply(
+          pendingFaqAdjustment,
+          structuredData.details,
+          structuredData.pricingSummary ?? null
+        );
+        structuredData.prompt = {
+          type: "quick-replies",
+          options: [...CONTINUE_BOOKING_OPTIONS],
+        };
+      }
+
+      if (!handledReply && PRICE_OBJECTION_RE.test(lastContent) && structuredData.pricingSummary && storedPriceQuote) {
         const discountedSummary = buildQuoteAdjustmentSummary(
           storedPriceQuote,
-          mergedDetails.selectedAddOns ?? [],
+          structuredData.details?.selectedAddOns ?? [],
           true
         );
         handledReply = `I understand — moving costs can add up. I can offer you a 10% discount if you book today. That brings your total to ${formatCurrency(discountedSummary.finalTotal)}. Want to lock that in?`;
@@ -1131,12 +1505,12 @@ export async function POST(request: Request) {
           type: "discount-offer",
           discountedTotal: discountedSummary.finalTotal,
         };
-      } else if (MAYBE_LATER_RE.test(lastContent)) {
+      } else if (!handledReply && MAYBE_LATER_RE.test(lastContent)) {
         handledReply = "No problem. Can I grab your name and number so we can follow up when you're ready? No obligation at all.";
         structuredData.prompt = { type: "lead-capture" };
-      } else if (INSURANCE_RE.test(lastContent)) {
+      } else if (!handledReply && INSURANCE_RE.test(lastContent)) {
         handledReply = "Yes! We're fully FMCSA licensed and every move is insured up to $50,000, so your belongings are protected throughout the move.";
-      } else if (TIMING_RE.test(lastContent) && mergedDetails.pickupZip && mergedDetails.dropoffZip) {
+      } else if (!handledReply && TIMING_RE.test(lastContent) && mergedDetails.pickupZip && mergedDetails.dropoffZip) {
         const distance = calculateDistanceMiles(
           zipToCoordinates(mergedDetails.pickupZip),
           zipToCoordinates(mergedDetails.dropoffZip)
@@ -1145,6 +1519,14 @@ export async function POST(request: Request) {
       }
 
       if (handledReply) {
+        if (bookingInProgress) {
+          structuredData.prompt ??= {
+            type: "quick-replies",
+            options: [...CONTINUE_BOOKING_OPTIONS],
+          };
+        } else {
+          structuredData.prompt ??= null;
+        }
         if (dbSession) {
           dbSession.messages.push({ role: "user", content: lastUserMessage.content, timestamp: new Date() });
           dbSession.messages.push({ role: "assistant", content: handledReply, timestamp: new Date() });
@@ -1158,6 +1540,32 @@ export async function POST(request: Request) {
 
         return NextResponse.json({
           assistantMessage: handledReply,
+          structuredData,
+          sessionId: dbSession?.sessionId ?? null,
+        });
+      }
+
+      const faqResponse = getGlobalFaqResponse(messages, lastContent);
+
+      if (faqResponse) {
+        structuredData.prompt = {
+          type: "quick-replies",
+          options: faqResponse.quickReplies,
+        };
+
+        if (dbSession) {
+          dbSession.messages.push({ role: "user", content: lastUserMessage.content, timestamp: new Date() });
+          dbSession.messages.push({ role: "assistant", content: faqResponse.assistantMessage, timestamp: new Date() });
+          dbSession.partialData = {
+            ...(dbSession.partialData ?? {}),
+            ...structuredData.details,
+          };
+          dbSession.expiresAt = sessionExpiry();
+          await dbSession.save();
+        }
+
+        return NextResponse.json({
+          assistantMessage: faqResponse.assistantMessage,
           structuredData,
           sessionId: dbSession?.sessionId ?? null,
         });
@@ -1236,6 +1644,19 @@ export async function POST(request: Request) {
             inferredQuote: Boolean(structuredData.priceQuote),
             inferredItems: mergedDetails.items.length,
           });
+        }
+
+        if (
+          structuredData.priceQuote &&
+          structuredData.pricingSummary &&
+          structuredData.pricingSummary.selectedAddOnIds.length > 0 &&
+          !structuredData.order
+        ) {
+          assistantText = buildFallbackAssistantMessage(
+            structuredData.details ?? { items: [] },
+            structuredData,
+            quoteAlreadyGiven
+          );
         }
 
         // Persist the new user+assistant turn into MongoDB

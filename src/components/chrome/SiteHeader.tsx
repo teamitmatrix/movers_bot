@@ -77,7 +77,7 @@ function DemoAwarenessBar() {
   return (
     <div className="border-b border-white/10 bg-slate-950 text-white">
       <div className="mx-auto flex max-w-6xl items-center justify-between gap-3 px-4 py-2 sm:px-6">
-        <p className="pr-2 text-[11px] font-medium tracking-[0.02em] text-slate-100 sm:text-xs">
+        <p className="line-clamp-2 pr-2 text-[10px] font-medium leading-4 tracking-[0.01em] text-slate-100 sm:line-clamp-none sm:text-xs sm:leading-5">
           {"🚀 Live Demo — Chat to book a move, then switch to Operator View to see it update in real time"}
         </p>
         <button
@@ -114,12 +114,12 @@ function OperatorToggle({ isOperatorView }: { isOperatorView: boolean }) {
   return (
     <Link
       href={href}
-      className="inline-flex h-11 items-center justify-center gap-2 rounded-full border border-slate-300 px-3 text-sm font-semibold text-slate-700 transition hover:border-slate-400 hover:bg-slate-50 hover:text-slate-900 sm:px-4"
+      className="inline-flex h-11 w-11 items-center justify-center gap-2 rounded-full border border-slate-300 px-0 text-sm font-semibold text-slate-700 transition hover:border-slate-400 hover:bg-slate-50 hover:text-slate-900 md:h-11 md:w-auto md:px-4"
       aria-label={label}
       title={label}
     >
       <Icon className="h-4 w-4" />
-      <span className="hidden lg:inline">{label}</span>
+      <span className="hidden md:inline">{label}</span>
     </Link>
   );
 }

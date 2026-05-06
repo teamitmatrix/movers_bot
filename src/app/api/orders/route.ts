@@ -26,6 +26,8 @@ type CreateOrderRequest = {
   originalPrice?: number;
   discountApplied?: boolean;
   discountAmount?: number;
+  reminderCall?: boolean;
+  afterHours?: boolean;
   moveDate?: string;
   inventorySize?: string;
   status?: OrderStatus;
@@ -56,6 +58,8 @@ function serializeOrder(order: OrderDocument & { _id: { toString(): string } }) 
     originalPrice: order.originalPrice ?? null,
     discountApplied: order.discountApplied ?? false,
     discountAmount: order.discountAmount ?? 0,
+    reminderCall: order.reminderCall ?? null,
+    afterHours: order.afterHours ?? false,
     customer: order.customer,
     moveDate: order.moveDate ?? null,
     inventorySize: order.inventorySize ?? null,
@@ -166,6 +170,14 @@ function validateOrderInput(body: CreateOrderRequest) {
     errors.push("discountAmount must be a non-negative number.");
   }
 
+  if (body.reminderCall !== undefined && typeof body.reminderCall !== "boolean") {
+    errors.push("reminderCall must be a boolean.");
+  }
+
+  if (body.afterHours !== undefined && typeof body.afterHours !== "boolean") {
+    errors.push("afterHours must be a boolean.");
+  }
+
   if (body.status !== undefined && !VALID_STATUSES.includes(body.status)) {
     errors.push("status must be one of: pending, confirmed, completed, lead-follow-up.");
   }
@@ -213,6 +225,8 @@ export async function POST(request: Request) {
       originalPrice: body.originalPrice,
       discountApplied: body.discountApplied,
       discountAmount: body.discountAmount,
+      reminderCall: body.reminderCall,
+      afterHours: body.afterHours,
       customer: body.customer,
       moveDate: body.moveDate,
       inventorySize: body.inventorySize,
@@ -230,5 +244,21 @@ export async function POST(request: Request) {
     );
   } catch (error) {
     return toErrorResponse(error, "POST /api/orders");
+  }
+}
+
+export async function DELETE() {
+  try {
+    await connectToDatabase();
+
+    const result = await Order.deleteMany({});
+    logger.info("Orders cleared", { deletedCount: result.deletedCount ?? 0 });
+
+    return NextResponse.json({
+      success: true,
+      deletedCount: result.deletedCount ?? 0,
+    });
+  } catch (error) {
+    return toErrorResponse(error, "DELETE /api/orders");
   }
 }

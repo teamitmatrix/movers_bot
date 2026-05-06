@@ -1,6 +1,8 @@
 import type { PricingResult } from "@/lib/pricing";
 
 export type ServiceAddOnId =
+  | "same-day-service"
+  | "specialty-item-handling"
   | "full-packing-service"
   | "storage-unit-30-days"
   | "furniture-disassembly";
@@ -11,6 +13,7 @@ export type ServiceAddOn = {
   shortLabel: string;
   price: number;
   emoji: string;
+  upsellVisible?: boolean;
 };
 
 export type QuoteAdjustmentSummary = {
@@ -25,6 +28,22 @@ export type QuoteAdjustmentSummary = {
 };
 
 export const SERVICE_ADDONS: ServiceAddOn[] = [
+  {
+    id: "same-day-service",
+    label: "Same-Day Service (+$50)",
+    shortLabel: "Same-Day Service",
+    price: 50,
+    emoji: "⚡",
+    upsellVisible: false,
+  },
+  {
+    id: "specialty-item-handling",
+    label: "Specialty Item Handling (+$100)",
+    shortLabel: "Specialty Item Handling",
+    price: 100,
+    emoji: "🎹",
+    upsellVisible: false,
+  },
   {
     id: "full-packing-service",
     label: "📦 Full Packing Service (+$150)",
@@ -58,6 +77,10 @@ export function isServiceAddOnId(value: unknown): value is ServiceAddOnId {
 
 export function getSelectedAddOns(addOnIds: ServiceAddOnId[] = []) {
   return SERVICE_ADDONS.filter((addOn) => addOnIds.includes(addOn.id));
+}
+
+export function getUpsellAddOns() {
+  return SERVICE_ADDONS.filter((addOn) => addOn.upsellVisible !== false);
 }
 
 export function buildQuoteAdjustmentSummary(

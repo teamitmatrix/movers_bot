@@ -17,7 +17,7 @@ export default function ChatWidget() {
   const hasShownNudgeRef = useRef(false);
 
   function isMobileViewport() {
-    return typeof window !== "undefined" && window.innerWidth < 640;
+    return typeof window !== "undefined" && window.innerWidth < 768;
   }
 
   function resetDragState() {
@@ -173,8 +173,8 @@ export default function ChatWidget() {
   return (
     <div
       className={[
-        "fixed inset-x-4 z-50 flex flex-col items-end gap-3 transition-all duration-200 sm:left-auto sm:right-6",
-        footerVisible && !open ? "bottom-32 sm:bottom-24" : "bottom-6",
+        "fixed inset-x-4 z-50 flex flex-col items-end gap-3 transition-all duration-200 md:left-auto md:right-6",
+        footerVisible && !open ? "bottom-32 md:bottom-24" : "bottom-6",
       ].join(" ")}
     >
       {open ? (
@@ -182,7 +182,7 @@ export default function ChatWidget() {
           type="button"
           aria-label="Close chat overlay"
           onClick={closeSheet}
-          className="fixed inset-0 z-40 bg-slate-950/45 backdrop-blur-[2px] sm:hidden"
+          className="fixed inset-0 z-40 bg-slate-950/45 backdrop-blur-[2px] md:hidden"
           style={{ opacity: isMobileViewport() ? Math.max(0, 1 - dragOffset / 220) : 1 }}
         />
       ) : null}
@@ -193,15 +193,15 @@ export default function ChatWidget() {
         aria-hidden={!open}
         className={[
           "z-50 w-full overflow-hidden bg-white shadow-2xl ring-1 ring-black/[0.06]",
-          "rounded-[28px] origin-bottom-right sm:w-[calc(100vw-3rem)] sm:max-w-[380px] sm:rounded-2xl",
-          "sm:bg-white",
-          "max-h-[calc(100dvh-1rem)] sm:max-h-none",
+          "rounded-[28px] origin-bottom-right md:w-[calc(100vw-3rem)] md:max-w-[380px] md:rounded-2xl",
+          "md:bg-white",
+          "max-h-[100dvh] md:max-h-none",
           open
             ? "animate-slide-up"
             : "hidden",
-          "sm:relative",
+          "md:relative",
           open
-            ? "fixed inset-x-0 bottom-0 mx-0 rounded-b-none rounded-t-[28px] sm:inset-auto sm:mx-0 sm:rounded-b-2xl"
+            ? "fixed inset-0 mx-0 rounded-none md:inset-auto md:mx-0 md:rounded-2xl"
             : "",
         ].join(" ")}
         style={{
@@ -213,14 +213,14 @@ export default function ChatWidget() {
         }}
       >
         <div
-          className="bg-[#1E3A8A] px-4 pb-3 pt-2 sm:px-4 sm:pt-3"
+          className="bg-[#1E3A8A] px-4 pb-3 pt-2 md:px-4 md:pt-3"
           onPointerDown={handleDragStart}
           onPointerMove={handleDragMove}
           onPointerUp={handleDragEnd}
           onPointerCancel={handleDragEnd}
           style={{ touchAction: "none" }}
         >
-          <div className="mb-2 flex justify-center sm:hidden">
+          <div className="mb-2 flex justify-center md:hidden">
             <span
               className="h-1.5 w-12 rounded-full bg-white/45"
               aria-hidden="true"
@@ -260,14 +260,25 @@ export default function ChatWidget() {
               event.currentTarget.blur();
               closeSheet();
             }}
-            aria-label="Minimize chat"
+            aria-label="Close chat"
             className="rounded-full p-1.5 text-white/70 transition hover:bg-white/20 hover:text-white"
           >
             <svg
+              className="h-4 w-4 md:hidden"
+              xmlns="http://www.w3.org/2000/svg"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              aria-hidden="true"
+            >
+              <path d="M6 6l12 12M18 6 6 18" strokeLinecap="round" />
+            </svg>
+            <svg
+              className="hidden h-4 w-4 md:block"
               xmlns="http://www.w3.org/2000/svg"
               viewBox="0 0 20 20"
               fill="currentColor"
-              className="h-4 w-4"
               aria-hidden="true"
             >
               <path
@@ -283,7 +294,7 @@ export default function ChatWidget() {
         {/* Chat body */}
         <ChatUI
           showHeader={false}
-          heightClassName="h-[min(68dvh,560px)] sm:h-[min(440px,calc(100vh-9rem))]"
+          heightClassName="h-[calc(100dvh-5rem)] md:h-[min(440px,calc(100vh-9rem))]"
         />
       </div>
 
