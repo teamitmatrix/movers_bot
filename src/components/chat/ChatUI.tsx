@@ -189,7 +189,18 @@ async function getOrCreateSessionId(): Promise<string> {
   if (existing) return existing;
 
   const response = await fetch("/api/sessions", { method: "POST" });
-  if (!response.ok) throw new Error("Could not start a session.");
+  if (!response.ok) {
+    let errorMessage = `Could not start a session (${response.status}).`;
+    try {
+      const data = (await response.json()) as { error?: string };
+      if (data?.error) {
+        errorMessage = data.error;
+      }
+    } catch {
+      // Ignore JSON parsing errors and keep the status-based fallback message.
+    }
+    throw new Error(errorMessage);
+  }
   const data = (await response.json()) as { sessionId: string };
   localStorage.setItem(SESSION_KEY, data.sessionId);
   return data.sessionId;
