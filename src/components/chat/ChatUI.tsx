@@ -445,7 +445,7 @@ function UpsellSelector({
       </div>
       <button
         type="button"
-        disabled={disabled || (!skipped && selectedAddOns.length === 0)}
+        disabled={disabled}
         onClick={onContinue}
         className="inline-flex rounded-2xl bg-slate-900 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
       >
@@ -543,6 +543,8 @@ export default function ChatUI({
   const [discountApplied, setDiscountApplied] = useState(false);
   const [, setMoveDate] = useState<string | null>(null);
   const [inventorySize, setInventorySize] = useState<string | null>(null);
+  const latestSelectedAddOnsRef = useRef<ServiceAddOnId[]>([]);
+  const latestUpsellSkippedRef = useRef(false);
   const sessionIdRef = useRef<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const sessionLoadVersionRef = useRef(0);
@@ -575,8 +577,11 @@ export default function ChatUI({
 
   function syncQuoteState(partialData?: SessionPartialData | null, quote?: PricingResult | null) {
     const nextSelectedAddOns = partialData?.selectedAddOns ?? [];
+    const nextUpsellSkipped = Boolean(partialData?.upsellReviewed && nextSelectedAddOns.length === 0);
+    latestSelectedAddOnsRef.current = nextSelectedAddOns;
+    latestUpsellSkippedRef.current = nextUpsellSkipped;
     setSelectedAddOns(nextSelectedAddOns);
-    setUpsellSkipped(Boolean(partialData?.upsellReviewed && nextSelectedAddOns.length === 0));
+    setUpsellSkipped(nextUpsellSkipped);
     setDiscountApplied(Boolean(partialData?.discountApplied));
 
     if (partialData?.moveDate) {
@@ -909,10 +914,13 @@ export default function ChatUI({
   async function handleUpsellContinue() {
     if (isLoading) return;
 
-    const selectedLabels = SERVICE_ADDONS.filter((addOn) => selectedAddOns.includes(addOn.id)).map(
+    const effectiveSelectedAddOns = latestSelectedAddOnsRef.current;
+    const effectiveUpsellSkipped = latestUpsellSkippedRef.current;
+
+    const selectedLabels = SERVICE_ADDONS.filter((addOn) => effectiveSelectedAddOns.includes(addOn.id)).map(
       (addOn) => addOn.shortLabel
     );
-    const userSelection = upsellSkipped || selectedLabels.length === 0
+    const userSelection = effectiveUpsellSkipped || selectedLabels.length === 0
       ? "No thanks, just the move"
       : selectedLabels.join(", ");
 
@@ -928,7 +936,7 @@ export default function ChatUI({
     if (!priceQuote) {
       // PRE-QUOTE PATH: persist add-ons then call API to calculate price
       try {
-        await persistBookingProgress({ selectedAddOns, upsellReviewed: true });
+        await persistBookingProgress({ selectedAddOns: effectiveSelectedAddOns, upsellReviewed: true });
 
         const sessionId = sessionIdRef.current ?? await getOrCreateSessionId();
         sessionIdRef.current = sessionId;
@@ -985,12 +993,12 @@ export default function ChatUI({
     setBookingStep("move-date");
     try {
       await persistBookingProgress({
-        selectedAddOns,
+        selectedAddOns: effectiveSelectedAddOns,
         upsellReviewed: true,
       });
 
-      const nextSummary = buildQuoteAdjustmentSummary(priceQuote, selectedAddOns, discountApplied);
-      const responseText = upsellSkipped || selectedLabels.length === 0
+      const nextSummary = buildQuoteAdjustmentSummary(priceQuote, effectiveSelectedAddOns, discountApplied);
+      const responseText = effectiveUpsellSkipped || selectedLabels.length === 0
         ? `No problem — keeping the move at ${nextSummary.finalTotal.toLocaleString("en-US", { style: "currency", currency: "USD" })}.\n\n${MOVE_DATE_PROMPT}`
         : `Added ${selectedLabels.join(", ")}. Your updated total is ${nextSummary.finalTotal.toLocaleString("en-US", { style: "currency", currency: "USD" })}.\n\n${MOVE_DATE_PROMPT}`;
 
@@ -1278,6 +1286,8 @@ export default function ChatUI({
     setPendingBookingSummary(null);
     setBookingStep("idle");
     setPriceQuote(null);
+    latestSelectedAddOnsRef.current = [];
+    latestUpsellSkippedRef.current = false;
     setSelectedAddOns([]);
     setUpsellSkipped(false);
     setDiscountApplied(false);
@@ -1950,14 +1960,19 @@ export default function ChatUI({
                   skipped={upsellSkipped}
                   disabled={isLoading}
                   onToggle={(value) => {
+                    latestUpsellSkippedRef.current = false;
                     setUpsellSkipped(false);
-                    setSelectedAddOns((prev) =>
-                      prev.includes(value)
+                    setSelectedAddOns((prev) => {
+                      const next = prev.includes(value)
                         ? prev.filter((item) => item !== value)
-                        : [...prev, value]
-                    );
+                        : [...prev, value];
+                      latestSelectedAddOnsRef.current = next;
+                      return next;
+                    });
                   }}
                   onSkip={() => {
+                    latestSelectedAddOnsRef.current = [];
+                    latestUpsellSkippedRef.current = true;
                     setSelectedAddOns([]);
                     setUpsellSkipped(true);
                   }}

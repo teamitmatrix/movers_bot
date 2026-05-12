@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { toErrorResponse } from "@/lib/apiError";
+import { ApiError, toErrorResponse } from "@/lib/apiError";
 import { makeLogger } from "@/lib/logger";
 import { connectToDatabase } from "@/lib/mongodb";
 import { checkRateLimit, getClientIp } from "@/lib/rateLimit";
@@ -17,6 +17,38 @@ function sessionExpiry() {
   const date = new Date();
   date.setHours(date.getHours() + 24);
   return date;
+}
+
+function mapSessionCreationError(error: unknown): ApiError | null {
+  if (!(error instanceof Error)) {
+    return null;
+  }
+
+  const message = error.message.toLowerCase();
+
+  if (message.includes("missing mongodb_uri")) {
+    return new ApiError(500, "Server misconfiguration: missing MONGODB_URI.");
+  }
+
+  if (
+    message.includes("authentication failed") ||
+    message.includes("bad auth") ||
+    message.includes("auth failed")
+  ) {
+    return new ApiError(503, "Database authentication failed. Check MongoDB user credentials.");
+  }
+
+  if (
+    message.includes("server selection") ||
+    message.includes("enotfound") ||
+    message.includes("econnrefused") ||
+    message.includes("timed out") ||
+    message.includes("connection")
+  ) {
+    return new ApiError(503, "Database is unreachable. Check Atlas network access and cluster status.");
+  }
+
+  return null;
 }
 
 export async function POST(request: Request) {
@@ -47,6 +79,10 @@ export async function POST(request: Request) {
 
     return NextResponse.json({ sessionId }, { status: 201 });
   } catch (error) {
+    const mappedError = mapSessionCreationError(error);
+    if (mappedError) {
+      return toErrorResponse(mappedError, "POST /api/sessions");
+    }
     return toErrorResponse(error, "POST /api/sessions");
   }
 }
