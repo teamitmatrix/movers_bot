@@ -395,14 +395,12 @@ function UpsellSelector({
   disabled,
   onToggle,
   onSkip,
-  onContinue,
 }: {
   selectedAddOns: ServiceAddOnId[];
   skipped: boolean;
   disabled: boolean;
   onToggle: (value: ServiceAddOnId) => void;
   onSkip: () => void;
-  onContinue: () => void;
 }) {
   const upsellAddOns = getUpsellAddOns();
 
@@ -443,14 +441,6 @@ function UpsellSelector({
           No thanks, just the move
         </button>
       </div>
-      <button
-        type="button"
-        disabled={disabled}
-        onClick={onContinue}
-        className="inline-flex rounded-2xl bg-slate-900 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
-      >
-        Continue
-      </button>
     </div>
   );
 }
@@ -1954,7 +1944,7 @@ export default function ChatUI({
 
           {bookingStep === "upsell" && !showContactForm && !showLeadForm ? (
             <div className="flex justify-start">
-              <div className="w-full max-w-[88%] sm:max-w-[80%]">
+              <div className="w-full max-w-[88%] space-y-3 sm:max-w-[80%]">
                 <UpsellSelector
                   selectedAddOns={selectedAddOns}
                   skipped={upsellSkipped}
@@ -1975,9 +1965,19 @@ export default function ChatUI({
                     latestUpsellSkippedRef.current = true;
                     setSelectedAddOns([]);
                     setUpsellSkipped(true);
+                    void handleUpsellContinue();
                   }}
-                  onContinue={() => void handleUpsellContinue()}
                 />
+                {selectedAddOns.length > 0 ? (
+                  <button
+                    type="button"
+                    disabled={isLoading}
+                    onClick={() => void handleUpsellContinue()}
+                    className="inline-flex rounded-2xl bg-slate-900 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    Continue
+                  </button>
+                ) : null}
               </div>
             </div>
           ) : null}
