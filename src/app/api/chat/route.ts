@@ -81,6 +81,59 @@ const DEMO_SESSION_MAX_USER_MESSAGES = 10;
 
 const US_ZIP_RE = /^\d{5}$/;
 const US_PHONE_RE = /^\+?1?[\s.-]?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}$/;
+
+// Map everyday item names to the closest supported pricing type
+const ITEM_ALIAS_MAP: Record<string, PricingItem["type"]> = {
+  chair: "sofa",
+  chairs: "sofa",
+  armchair: "sofa",
+  armchairs: "sofa",
+  couch: "sofa",
+  loveseat: "sofa",
+  sectional: "sofa",
+  recliner: "sofa",
+  recliners: "sofa",
+  table: "boxes",
+  tables: "boxes",
+  desk: "boxes",
+  desks: "boxes",
+  dresser: "wardrobe",
+  dressers: "wardrobe",
+  closet: "wardrobe",
+  cabinet: "wardrobe",
+  cabinets: "wardrobe",
+  bookshelf: "wardrobe",
+  bookshelves: "wardrobe",
+  bookcase: "wardrobe",
+  bookcases: "wardrobe",
+  fridge: "appliance",
+  refrigerator: "appliance",
+  washer: "appliance",
+  dryer: "appliance",
+  dishwasher: "appliance",
+  microwave: "appliance",
+  stove: "appliance",
+  oven: "appliance",
+  tv: "boxes",
+  television: "boxes",
+  mattress: "bed",
+  mattresses: "bed",
+  nightstand: "boxes",
+  lamp: "boxes",
+  lamps: "boxes",
+  mirror: "boxes",
+  mirrors: "boxes",
+  box: "boxes",
+};
+
+function normalizeItemType(raw: string): PricingItem["type"] {
+  const lower = raw.toLowerCase().trim();
+  if (ITEM_ALIAS_MAP[lower]) return ITEM_ALIAS_MAP[lower];
+  const VALID_TYPES: PricingItem["type"][] = ["bed", "sofa", "wardrobe", "appliance", "boxes", "piano"];
+  if (VALID_TYPES.includes(lower as PricingItem["type"])) return lower as PricingItem["type"];
+  // Default unknown items to boxes so quote never fails
+  return "boxes";
+}
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const MAX_MESSAGES = 50;
 const MAX_MESSAGE_LENGTH = 1000;
@@ -118,6 +171,8 @@ CONVERSATION RULES — follow these exactly:
 5. Always end your message with a clear, natural next step or soft question — keep the conversation flowing.
 6. Never repeat information you already gave unless explicitly asked.
 7. Never ask for name, phone, or email — the booking form handles that.
+8. ITEM TYPES: When user mentions items, map them to the closest supported type: bed (beds/mattresses), sofa (sofas/couches/chairs/recliners), wardrobe (wardrobes/dressers/cabinets/bookshelves), appliance (fridge/washer/dryer/oven/dishwasher), boxes (tables/desks/lamps/TVs/misc), piano. NEVER tell the user their items are unsupported — just silently map them and proceed to calculate_price.
+9. ZIP CODE VALIDATION: If the user provides a pickup or dropoff ZIP code, it MUST be a valid 5-digit US ZIP code (e.g., 10001, 90210). If they provide anything else (letters, wrong length, non-US), tell them it's not a valid US ZIP and ask them to provide a correct one. Do not accept or use invalid ZIPs.
 
 ${quoteAlreadyGiven ? `
 CURRENT STATE: Quote already given.
@@ -190,6 +245,21 @@ function isValidUsZip(zip: string): boolean {
   return US_ZIP_RE.test(zip.trim());
 }
 
+function extractZipLikeToken(text: string): string | null {
+  const match = text.match(/\b\d{3,10}\b/);
+  return match ? match[0] : null;
+}
+
+function getInvalidZipReentryMessage(latestUserText: string, details: BookingDetails | null | undefined): string | null {
+  const zipToken = extractZipLikeToken(latestUserText);
+  if (!zipToken || isValidUsZip(zipToken)) {
+    return null;
+  }
+
+  const missingField = !details?.pickupZip ? "pickup" : "dropoff";
+  return `That doesn't look like a valid US ZIP code. Please enter a 5-digit ${missingField} ZIP code.`;
+}
+
 function isValidUsPhone(phone: string): boolean {
   return US_PHONE_RE.test(phone.replace(/\s/g, ""));
 }
@@ -200,8 +270,8 @@ function getLastUserMessage(messages: IncomingMessage[]) {
 
 function getMissingQuoteFields(details: BookingDetails) {
   const missing: string[] = [];
-  if (!details.pickupZip) missing.push("pickup_zip");
-  if (!details.dropoffZip) missing.push("dropoff_zip");
+  if (!details.pickupZip || !isValidUsZip(details.pickupZip)) missing.push("pickup_zip");
+  if (!details.dropoffZip || !isValidUsZip(details.dropoffZip)) missing.push("dropoff_zip");
   if (details.items.length === 0) missing.push("items");
   return missing;
 }
@@ -239,7 +309,7 @@ function normalizeBookingDetails(args: Record<string, unknown>): BookingDetails 
               typeof item.type === "string" &&
               typeof item.quantity === "number"
           )
-          .map((item) => ({ type: item.type as PricingItem["type"], quantity: item.quantity }))
+          .map((item) => ({ type: normalizeItemType(item.type), quantity: Math.max(1, Math.round(Number(item.quantity))) }))
       : [],
     selectedAddOns: Array.isArray(args.selected_add_ons)
       ? args.selected_add_ons.filter(isServiceAddOnId)
@@ -739,7 +809,10 @@ export async function POST(request: Request) {
       const bookingDetails: BookingDetails = {
         pickupZip: partial.pickupZip,
         dropoffZip: partial.dropoffZip,
-        items: partial.items,
+        items: (partial.items ?? []).map((item) => ({
+          type: normalizeItemType(item.type as string),
+          quantity: Math.max(1, Math.round(Number(item.quantity))),
+        })),
         selectedAddOns: partial.selectedAddOns,
         upsellReviewed: partial.upsellReviewed,
         discountApplied: partial.discountApplied,
@@ -751,6 +824,16 @@ export async function POST(request: Request) {
         customerPhone: phone,
         customerEmail: email,
       };
+
+      logger.info("Contact form order payload", {
+        pickupZip: bookingDetails.pickupZip,
+        dropoffZip: bookingDetails.dropoffZip,
+        itemCount: bookingDetails.items.length,
+        selectedAddOns: bookingDetails.selectedAddOns,
+        moveDate: bookingDetails.moveDate,
+        inventorySize: bookingDetails.inventorySize,
+        sessionId,
+      });
 
       const { order, priceQuote, pricingSummary } = await createOrder(bookingDetails);
       const formattedTotal = formatCurrency(pricingSummary.finalTotal);
@@ -848,6 +931,32 @@ export async function POST(request: Request) {
       order: null,
     };
 
+    const latestUserMessage = getLastUserMessage(messages);
+    const shouldValidateZipInput =
+      !isBooked &&
+      !quoteAlreadyGiven &&
+      Boolean(!structuredData.details?.pickupZip || !structuredData.details?.dropoffZip);
+    const invalidZipMessage = shouldValidateZipInput
+      ? getInvalidZipReentryMessage(latestUserMessage?.content ?? "", structuredData.details)
+      : null;
+
+    if (invalidZipMessage) {
+      if (dbSession) {
+        if (latestUserMessage) {
+          dbSession.messages.push({ role: "user", content: latestUserMessage.content, timestamp: new Date() });
+        }
+        dbSession.messages.push({ role: "assistant", content: invalidZipMessage, timestamp: new Date() });
+        dbSession.expiresAt = sessionExpiry();
+        await dbSession.save();
+      }
+
+      return NextResponse.json({
+        assistantMessage: invalidZipMessage,
+        structuredData,
+        sessionId: dbSession?.sessionId ?? null,
+      });
+    }
+
     logger.info("Chat request → OpenAI", { sessionId, messageCount: messages.length, quoteAlreadyGiven, isBooked });
 
     // ── AI agentic loop ──────────────────────────────────────────────────────
@@ -898,7 +1007,24 @@ export async function POST(request: Request) {
           }
           dbSession.messages.push({ role: "assistant", content: assistantText, timestamp: new Date() });
           if (structuredData.details) {
-            dbSession.partialData = { ...(dbSession.partialData ?? {}), ...structuredData.details };
+            // Preserve selectedAddOns already in the DB session.
+            // The AI's tool calls (calculate_price) never include selectedAddOns,
+            // so we must not let them overwrite what the user selected in the upsell step.
+            const preservedAddOns =
+              structuredData.details.selectedAddOns?.length
+                ? structuredData.details.selectedAddOns
+                : (dbSession.partialData?.selectedAddOns ?? []);
+            dbSession.partialData = {
+              ...(dbSession.partialData ?? {}),
+              ...structuredData.details,
+              selectedAddOns: preservedAddOns,
+            };
+            logger.info("DB partialData updated", {
+              selectedAddOns: preservedAddOns,
+              moveDate: dbSession.partialData.moveDate,
+              inventorySize: dbSession.partialData.inventorySize,
+              itemCount: dbSession.partialData.items?.length ?? 0,
+            });
           }
           dbSession.expiresAt = sessionExpiry();
           await dbSession.save();
@@ -938,16 +1064,27 @@ export async function POST(request: Request) {
         const args = parseToolArguments(toolCall.function.arguments);
         const details = normalizeBookingDetails(args);
 
-        // Merge new details into structured data
+        // Merge new details into structured data using mergeBookingDetails so that
+        // fields not present in the tool call args (inventorySize, moveDate, etc.)
+        // are never overwritten with undefined — they fall back to the already-stored value.
+        // selectedAddOns: prefer AI-provided > already-merged > DB-stored > []
+        const mergedDetails = mergeBookingDetails(details, structuredData.details ?? { items: [] });
         structuredData.details = {
-          ...structuredData.details,
-          ...details,
-          items: details.items.length > 0 ? details.items : structuredData.details?.items ?? [],
+          ...mergedDetails,
           selectedAddOns:
             details.selectedAddOns && details.selectedAddOns.length > 0
               ? details.selectedAddOns
-              : structuredData.details?.selectedAddOns ?? [],
+              : structuredData.details?.selectedAddOns?.length
+                ? structuredData.details.selectedAddOns
+                : storedDetails?.selectedAddOns ?? [],
         };
+
+        logger.info("Tool call detail merge", {
+          toolName: toolCall.function.name,
+          incomingAddOns: details.selectedAddOns,
+          preservedAddOns: structuredData.details.selectedAddOns,
+          storedAddOns: storedDetails?.selectedAddOns,
+        });
 
         let toolResult: unknown;
 

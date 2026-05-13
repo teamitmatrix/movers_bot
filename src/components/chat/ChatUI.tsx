@@ -2,6 +2,8 @@
 
 import { FormEvent, useEffect, useRef, useState } from "react";
 
+import ContactInlineForm, { type ContactFormData } from "@/components/chat/ContactInlineForm";
+
 import {
   buildQuoteAdjustmentSummary,
   getUpsellAddOns,
@@ -32,12 +34,6 @@ type Message = {
     discountApplied?: boolean;
     discountAmount?: number;
   };
-};
-
-type ContactFormData = {
-  name: string;
-  phone: string;
-  email: string;
 };
 
 type LeadFormData = {
@@ -105,7 +101,7 @@ const INVENTORY_OPTIONS = [
   "Just a few items",
 ] as const;
 
-const UPSELL_PROMPT = "Would you like to add any of these services?";
+const UPSELL_PROMPT = "Would you like to add any extra services to your move?";
 const MOVE_DATE_PROMPT = "Great! When are you planning to move?";
 const INVENTORY_PROMPT = "What are you moving? This helps us send the right crew.";
 const ITEM_DETAILS_PROMPT = "Please list the main items for this move (example: 1 sofa, 2 beds, 10 boxes).";
@@ -204,71 +200,6 @@ async function getOrCreateSessionId(): Promise<string> {
   const data = (await response.json()) as { sessionId: string };
   localStorage.setItem(SESSION_KEY, data.sessionId);
   return data.sessionId;
-}
-
-function ContactInlineForm({
-  onSubmit,
-  isLoading,
-}: {
-  onSubmit: (data: ContactFormData) => void;
-  isLoading: boolean;
-}) {
-  const [name, setName] = useState("");
-  const [phone, setPhone] = useState("");
-  const [email, setEmail] = useState("");
-
-  function handleSubmit(e: FormEvent<HTMLFormElement>) {
-    e.preventDefault();
-    if (!name.trim() || !phone.trim()) return;
-    onSubmit({ name: name.trim(), phone: phone.trim(), email: email.trim() });
-  }
-
-  const inputClass =
-    "w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm text-slate-900 outline-none transition focus:border-blue-500 disabled:opacity-50";
-
-  return (
-    <form
-      onSubmit={handleSubmit}
-      className="w-full rounded-2xl border border-blue-100 bg-blue-50 px-4 py-4 text-sm"
-    >
-      <p className="mb-3 font-semibold text-slate-800">Complete your booking:</p>
-      <div className="space-y-2">
-        <input
-          required
-          type="text"
-          placeholder="Full name *"
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          disabled={isLoading}
-          className={inputClass}
-        />
-        <input
-          required
-          type="tel"
-          placeholder="Phone number *"
-          value={phone}
-          onChange={(e) => setPhone(e.target.value)}
-          disabled={isLoading}
-          className={inputClass}
-        />
-        <input
-          type="email"
-          placeholder="Email (optional)"
-          value={email}
-          onChange={(e) => setEmail(e.target.value)}
-          disabled={isLoading}
-          className={inputClass}
-        />
-        <button
-          type="submit"
-          disabled={isLoading || !name.trim() || !phone.trim()}
-          className="w-full rounded-lg bg-orange-500 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-orange-600 disabled:opacity-50"
-        >
-          {isLoading ? "Confirming…" : "Confirm Booking"}
-        </button>
-      </div>
-    </form>
-  );
 }
 
 function LeadInlineForm({
@@ -389,62 +320,6 @@ function MoveDatePicker({
   );
 }
 
-function UpsellSelector({
-  selectedAddOns,
-  skipped,
-  disabled,
-  onToggle,
-  onSkip,
-}: {
-  selectedAddOns: ServiceAddOnId[];
-  skipped: boolean;
-  disabled: boolean;
-  onToggle: (value: ServiceAddOnId) => void;
-  onSkip: () => void;
-}) {
-  const upsellAddOns = getUpsellAddOns();
-
-  return (
-    <div className="space-y-3 rounded-3xl border border-orange-100 bg-[linear-gradient(145deg,#fff7ed_0%,#ffffff_45%,#ffedd5_100%)] p-4 shadow-sm">
-      <div className="flex flex-wrap gap-2">
-        {upsellAddOns.map((addOn) => {
-          const isSelected = selectedAddOns.includes(addOn.id);
-
-          return (
-            <button
-              key={addOn.id}
-              type="button"
-              disabled={disabled}
-              onClick={() => onToggle(addOn.id)}
-              className={[
-                "rounded-2xl border px-4 py-3 text-left text-sm font-medium transition disabled:cursor-not-allowed disabled:opacity-50",
-                isSelected
-                  ? "border-orange-500 bg-orange-500 text-white shadow-sm"
-                  : "border-orange-200 bg-white text-slate-700 hover:border-orange-300 hover:bg-orange-50",
-              ].join(" ")}
-            >
-              {addOn.label}
-            </button>
-          );
-        })}
-        <button
-          type="button"
-          disabled={disabled}
-          onClick={onSkip}
-          className={[
-            "rounded-2xl border px-4 py-3 text-left text-sm font-medium transition disabled:cursor-not-allowed disabled:opacity-50",
-            skipped
-              ? "border-slate-900 bg-slate-900 text-white shadow-sm"
-              : "border-slate-200 bg-white text-slate-700 hover:border-slate-300 hover:bg-slate-50",
-          ].join(" ")}
-        >
-          No thanks, just the move
-        </button>
-      </div>
-    </div>
-  );
-}
-
 function BookingSummaryCard({
   summary,
 }: {
@@ -522,6 +397,9 @@ export default function ChatUI({
   const [isBotTyping, setIsBotTyping] = useState(false);
   const [isResetting, setIsResetting] = useState(false);
   const [showContactForm, setShowContactForm] = useState(false);
+  const [contactFormError, setContactFormError] = useState<string | undefined>(undefined);
+  // Separate from global isLoading so contact form is never disabled by unrelated operations
+  const [isContactFormSubmitting, setIsContactFormSubmitting] = useState(false);
   const [showLeadForm, setShowLeadForm] = useState(false);
   const [showDiscountChoices, setShowDiscountChoices] = useState(false);
   const [, setFaqQuickReplies] = useState<string[]>([]);
@@ -529,7 +407,6 @@ export default function ChatUI({
   const [pendingBookingSummary, setPendingBookingSummary] = useState<NonNullable<Message["bookingSummary"]> | null>(null);
   const [priceQuote, setPriceQuote] = useState<PricingResult | null>(null);
   const [selectedAddOns, setSelectedAddOns] = useState<ServiceAddOnId[]>([]);
-  const [upsellSkipped, setUpsellSkipped] = useState(false);
   const [discountApplied, setDiscountApplied] = useState(false);
   const [, setMoveDate] = useState<string | null>(null);
   const [inventorySize, setInventorySize] = useState<string | null>(null);
@@ -571,7 +448,6 @@ export default function ChatUI({
     latestSelectedAddOnsRef.current = nextSelectedAddOns;
     latestUpsellSkippedRef.current = nextUpsellSkipped;
     setSelectedAddOns(nextSelectedAddOns);
-    setUpsellSkipped(nextUpsellSkipped);
     setDiscountApplied(Boolean(partialData?.discountApplied));
 
     if (partialData?.moveDate) {
@@ -901,11 +777,14 @@ export default function ChatUI({
     }
   }
 
-  async function handleUpsellContinue() {
+  async function handleUpsellContinue(overrides?: {
+    selectedAddOns?: ServiceAddOnId[];
+    skipped?: boolean;
+  }) {
     if (isLoading) return;
 
-    const effectiveSelectedAddOns = latestSelectedAddOnsRef.current;
-    const effectiveUpsellSkipped = latestUpsellSkippedRef.current;
+    const effectiveSelectedAddOns = overrides?.selectedAddOns ?? latestSelectedAddOnsRef.current;
+    const effectiveUpsellSkipped = overrides?.skipped ?? latestUpsellSkippedRef.current;
 
     const selectedLabels = SERVICE_ADDONS.filter((addOn) => effectiveSelectedAddOns.includes(addOn.id)).map(
       (addOn) => addOn.shortLabel
@@ -915,84 +794,34 @@ export default function ChatUI({
       : selectedLabels.join(", ");
 
     const userMessage: Message = { id: crypto.randomUUID(), role: "user", content: userSelection };
-    const allMessages = [...messages, userMessage];
-    setMessages(allMessages);
+    setMessages((prev) => [...prev, userMessage]);
     setIsLoading(true);
     setIsBotTyping(true);
 
     const typingStartedAt = Date.now();
     const minimumTypingDelay = getTypingDelay();
 
-    if (!priceQuote) {
-      // PRE-QUOTE PATH: persist add-ons then call API to calculate price
-      try {
-        await persistBookingProgress({ selectedAddOns: effectiveSelectedAddOns, upsellReviewed: true });
-
-        const sessionId = sessionIdRef.current ?? await getOrCreateSessionId();
-        sessionIdRef.current = sessionId;
-
-        const chatHistory = allMessages
-          .filter((m) => m.id !== "welcome")
-          .map(({ role, content }) => ({ role, content }));
-
-        const response = await fetch("/api/chat", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ messages: chatHistory, sessionId }),
-        });
-
-        if (!response.ok) throw new Error("The assistant is unavailable right now.");
-
-        const data = (await response.json()) as {
-          assistantMessage: string;
-          sessionId?: string | null;
-          structuredData?: ChatStructuredData;
-        };
-
-        if (data.sessionId) {
-          sessionIdRef.current = data.sessionId;
-          localStorage.setItem(SESSION_KEY, data.sessionId);
-        }
-
-        syncQuoteState(data.structuredData?.details, data.structuredData?.priceQuote);
-        setShowContactForm(false);
-        setShowLeadForm(false);
-        setShowDiscountChoices(false);
-
-        await showAssistantReply(data.assistantMessage, typingStartedAt, minimumTypingDelay);
-
-        if (data.structuredData?.priceQuote) {
-          setBookingStep("move-date");
-          appendAssistantQuickReplyMessage(MOVE_DATE_PROMPT, MOVE_DATE_OPTIONS);
-        }
-      } catch (error) {
-        await showAssistantReply(
-          error instanceof Error ? error.message : "Something went wrong. Please try again.",
-          typingStartedAt,
-          minimumTypingDelay
-        );
-        setBookingStep("upsell");
-      } finally {
-        setIsBotTyping(false);
-        setIsLoading(false);
-      }
-      return;
-    }
-
-    // POST-QUOTE PATH: add-ons selected after quote was already shown
     setBookingStep("move-date");
     try {
-      await persistBookingProgress({
-        selectedAddOns: effectiveSelectedAddOns,
-        upsellReviewed: true,
-      });
+      await persistBookingProgress({ selectedAddOns: effectiveSelectedAddOns, upsellReviewed: true });
 
-      const nextSummary = buildQuoteAdjustmentSummary(priceQuote, effectiveSelectedAddOns, discountApplied);
-      const responseText = effectiveUpsellSkipped || selectedLabels.length === 0
-        ? `No problem — keeping the move at ${nextSummary.finalTotal.toLocaleString("en-US", { style: "currency", currency: "USD" })}.\n\n${MOVE_DATE_PROMPT}`
-        : `Added ${selectedLabels.join(", ")}. Your updated total is ${nextSummary.finalTotal.toLocaleString("en-US", { style: "currency", currency: "USD" })}.\n\n${MOVE_DATE_PROMPT}`;
+      let confirmText: string;
+      if (priceQuote) {
+        const summary = buildQuoteAdjustmentSummary(priceQuote, effectiveSelectedAddOns, discountApplied);
+        const totalStr = summary.finalTotal.toLocaleString("en-US", { style: "currency", currency: "USD" });
+        if (effectiveUpsellSkipped || selectedLabels.length === 0) {
+          confirmText = `Your estimated move total is ${totalStr}.`;
+        } else {
+          confirmText = `Your estimated move total is ${totalStr}, including ${selectedLabels.join(", ")}.`;
+        }
+      } else {
+        confirmText = effectiveUpsellSkipped || selectedLabels.length === 0
+          ? "No problem — keeping the move as is."
+          : `Great! Added ${selectedLabels.join(", ")} to your move.`;
+      }
 
-      await showAssistantReply(responseText, typingStartedAt, minimumTypingDelay);
+      await showAssistantReply(confirmText, typingStartedAt, minimumTypingDelay);
+      appendAssistantQuickReplyMessage(MOVE_DATE_PROMPT, MOVE_DATE_OPTIONS);
     } catch (error) {
       await showAssistantReply(
         error instanceof Error ? error.message : "Something went wrong. Please try again.",
@@ -1082,8 +911,8 @@ export default function ChatUI({
     try {
       await persistBookingProgress({ moveDate: value });
       if (inventorySize) {
-        setShowContactForm(true);
         await showAssistantReply(CONTACT_PROMPT, typingStartedAt, minimumTypingDelay);
+        setShowContactForm(true);
       } else {
         await showAssistantReply(INVENTORY_PROMPT, typingStartedAt, minimumTypingDelay);
       }
@@ -1121,8 +950,8 @@ export default function ChatUI({
 
     try {
       await persistBookingProgress({ inventorySize: value });
-      setShowContactForm(true);
       await showAssistantReply(CONTACT_PROMPT, typingStartedAt, minimumTypingDelay);
+      setShowContactForm(true);
     } catch (error) {
       await showAssistantReply(
         error instanceof Error ? error.message : "Something went wrong. Please try again.",
@@ -1176,11 +1005,10 @@ export default function ChatUI({
   async function handleItemEntrySubmit(value: string) {
     if (isLoading) return;
 
-    setMessages((prev) => [
-      ...prev,
-      { id: crypto.randomUUID(), role: "user", content: value },
-    ]);
-    setBookingStep("upsell");
+    const userMessage: Message = { id: crypto.randomUUID(), role: "user", content: value };
+    const allMessages = [...messages, userMessage];
+    setMessages(allMessages);
+    setInput("");
     setIsLoading(true);
     setIsBotTyping(true);
 
@@ -1188,7 +1016,45 @@ export default function ChatUI({
     const minimumTypingDelay = getTypingDelay();
 
     try {
+      const sessionId = sessionIdRef.current ?? await getOrCreateSessionId();
+      sessionIdRef.current = sessionId;
+
+      const chatHistory = allMessages
+        .filter((m) => m.id !== "welcome")
+        .map(({ role, content }) => ({ role, content }));
+
+      const response = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ messages: chatHistory, sessionId }),
+      });
+
+      if (!response.ok) throw new Error("The assistant is unavailable right now.");
+
+      const data = (await response.json()) as {
+        assistantMessage: string;
+        sessionId?: string | null;
+        structuredData?: ChatStructuredData;
+      };
+
+      if (data.sessionId) {
+        sessionIdRef.current = data.sessionId;
+        localStorage.setItem(SESSION_KEY, data.sessionId);
+      }
+
+      syncQuoteState(data.structuredData?.details, data.structuredData?.priceQuote);
+
+      // Always show only the upsell prompt here — the combined quote (items + add-ons)
+      // is revealed AFTER the user makes their add-on selection in handleUpsellContinue.
+      setBookingStep("upsell");
       await showAssistantReply(UPSELL_PROMPT, typingStartedAt, minimumTypingDelay);
+    } catch (error) {
+      await showAssistantReply(
+        error instanceof Error ? error.message : "Something went wrong. Please try again.",
+        typingStartedAt,
+        minimumTypingDelay
+      );
+      setBookingStep("item-entry");
     } finally {
       setIsBotTyping(false);
       setIsLoading(false);
@@ -1279,7 +1145,6 @@ export default function ChatUI({
     latestSelectedAddOnsRef.current = [];
     latestUpsellSkippedRef.current = false;
     setSelectedAddOns([]);
-    setUpsellSkipped(false);
     setDiscountApplied(false);
     setMoveDate(null);
     setInventorySize(null);
@@ -1323,7 +1188,6 @@ export default function ChatUI({
     }
 
     if (bookingStep === "item-entry" && !shouldInterruptFlow) {
-      setInput("");
       await handleItemEntrySubmit(trimmedInput);
       return;
     }
@@ -1443,12 +1307,7 @@ export default function ChatUI({
 
         if (!data.structuredData.details?.upsellReviewed) {
           setBookingStep("upsell");
-          await showAssistantReply(
-            "Got your move details. Before I finalize your quote, would you like to add any extra services?",
-            typingStartedAt,
-            minimumTypingDelay
-          );
-          appendAssistantMessage(UPSELL_PROMPT);
+          await showAssistantReply(UPSELL_PROMPT, typingStartedAt, minimumTypingDelay);
         } else if (data.structuredData.details?.moveDate) {
           await showAssistantReply(data.assistantMessage, typingStartedAt, minimumTypingDelay);
           if (data.structuredData.details.inventorySize) {
@@ -1488,9 +1347,21 @@ export default function ChatUI({
     : "h-[min(440px,calc(100vh-9rem))] sm:h-[min(440px,calc(100vh-9rem))]";
 
   async function handleContactSubmit(formData: ContactFormData) {
-    if (isLoading) return;
+    // Guard on isContactFormSubmitting, NOT the global isLoading.
+    // This ensures the form can be submitted even if an unrelated operation
+    // set isLoading=true and left the form in a permanently disabled state.
+    if (isContactFormSubmitting) return;
+    setIsContactFormSubmitting(true);
     setIsLoading(true);
     setIsBotTyping(true);
+    setContactFormError(undefined);
+
+    console.log("[contact-form] submit initiated", {
+      name: formData.name,
+      phone: formData.phone,
+      hasEmail: Boolean(formData.email),
+      sessionId: sessionIdRef.current,
+    });
     const typingStartedAt = Date.now();
     const minimumTypingDelay = getTypingDelay();
     try {
@@ -1529,10 +1400,16 @@ export default function ChatUI({
         discountApplied,
       } : undefined, priceQuote);
 
+      console.log("[contact-form] API response ok", {
+        hasOrder: Boolean(responseData.structuredData?.order?.id),
+        sessionId: responseData.sessionId,
+      });
+
       setShowContactForm(false);
       setShowLeadForm(false);
       setShowDiscountChoices(false);
       setFaqQuickReplies([]);
+      setContactFormError(undefined);
       if (
         responseData.structuredData?.order?.id &&
         responseData.structuredData.order.recordId &&
@@ -1582,14 +1459,13 @@ export default function ChatUI({
         );
       }
     } catch (error) {
-      await showAssistantReply(
-        error instanceof Error ? error.message : "Something went wrong. Please try again.",
-        typingStartedAt,
-        minimumTypingDelay
-      );
+      const errMsg = error instanceof Error ? error.message : "Something went wrong. Please try again.";
+      console.error("[contact-form] submission failed", { error: errMsg });
+      setContactFormError(errMsg);
     } finally {
       setIsBotTyping(false);
       setIsLoading(false);
+      setIsContactFormSubmitting(false);
     }
   }
 
@@ -1901,7 +1777,11 @@ export default function ChatUI({
           {showContactForm && (
             <div className="flex justify-start">
               <div className="w-full max-w-[88%] sm:max-w-[80%]">
-                <ContactInlineForm onSubmit={handleContactSubmit} isLoading={isLoading} />
+                <ContactInlineForm
+                  onSubmit={handleContactSubmit}
+                  isLoading={isContactFormSubmitting}
+                  error={contactFormError}
+                />
               </div>
             </div>
           )}
@@ -1942,42 +1822,61 @@ export default function ChatUI({
             </div>
           ) : null}
 
-          {bookingStep === "upsell" && !showContactForm && !showLeadForm ? (
+          {bookingStep === "upsell" && !isLoading && !showContactForm && !showLeadForm ? (
             <div className="flex justify-start">
-              <div className="w-full max-w-[88%] space-y-3 sm:max-w-[80%]">
-                <UpsellSelector
-                  selectedAddOns={selectedAddOns}
-                  skipped={upsellSkipped}
-                  disabled={isLoading}
-                  onToggle={(value) => {
-                    latestUpsellSkippedRef.current = false;
-                    setUpsellSkipped(false);
-                    setSelectedAddOns((prev) => {
-                      const next = prev.includes(value)
-                        ? prev.filter((item) => item !== value)
-                        : [...prev, value];
-                      latestSelectedAddOnsRef.current = next;
-                      return next;
-                    });
-                  }}
-                  onSkip={() => {
-                    latestSelectedAddOnsRef.current = [];
-                    latestUpsellSkippedRef.current = true;
-                    setSelectedAddOns([]);
-                    setUpsellSkipped(true);
-                    void handleUpsellContinue();
-                  }}
-                />
-                {selectedAddOns.length > 0 ? (
+              <div className="w-full max-w-[88%] sm:max-w-[80%]">
+                <div className="flex flex-wrap gap-2 overflow-x-auto pb-1">
+                  {getUpsellAddOns().map((addOn) => {
+                    const isSelected = selectedAddOns.includes(addOn.id);
+                    return (
+                      <button
+                        key={addOn.id}
+                        type="button"
+                        disabled={isLoading}
+                        onClick={() => {
+                          const next = isSelected
+                            ? selectedAddOns.filter((id) => id !== addOn.id)
+                            : [...selectedAddOns, addOn.id];
+                          latestSelectedAddOnsRef.current = next;
+                          latestUpsellSkippedRef.current = false;
+                          setSelectedAddOns(next);
+                        }}
+                        className={`min-h-11 max-w-full rounded-full border px-4 py-2.5 text-left text-sm font-medium transition disabled:cursor-not-allowed disabled:opacity-50 sm:min-h-10 sm:px-3 sm:py-2 ${
+                          isSelected
+                            ? "border-blue-600 bg-blue-600 text-white hover:bg-blue-700"
+                            : "border-blue-200 bg-blue-50 text-blue-700 hover:border-blue-300 hover:bg-blue-100"
+                        }`}
+                      >
+                        {addOn.label}
+                      </button>
+                    );
+                  })}
+                  {selectedAddOns.length > 0 ? (
+                    <button
+                      type="button"
+                      disabled={isLoading}
+                      onClick={() => {
+                        void handleUpsellContinue({ selectedAddOns, skipped: false });
+                      }}
+                      className="min-h-11 max-w-full rounded-full border border-emerald-600 bg-emerald-600 px-4 py-2.5 text-left text-sm font-semibold text-white transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50 sm:min-h-10 sm:px-3 sm:py-2"
+                    >
+                      Confirm my services →
+                    </button>
+                  ) : null}
                   <button
                     type="button"
                     disabled={isLoading}
-                    onClick={() => void handleUpsellContinue()}
-                    className="inline-flex rounded-2xl bg-slate-900 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+                    onClick={() => {
+                      latestSelectedAddOnsRef.current = [];
+                      latestUpsellSkippedRef.current = true;
+                      setSelectedAddOns([]);
+                      void handleUpsellContinue({ selectedAddOns: [], skipped: true });
+                    }}
+                    className="min-h-11 max-w-full rounded-full border border-slate-300 bg-slate-50 px-4 py-2.5 text-left text-sm font-medium text-slate-600 transition hover:border-slate-400 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-50 sm:min-h-10 sm:px-3 sm:py-2"
                   >
-                    Continue
+                    No thanks, just the move
                   </button>
-                ) : null}
+                </div>
               </div>
             </div>
           ) : null}

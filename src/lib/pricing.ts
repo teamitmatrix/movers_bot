@@ -120,7 +120,8 @@ function calculateItemCost(items: PricingItem[]) {
   }
 
   const breakdown: ItemBreakdown[] = items.map((item) => {
-    if (!Number.isInteger(item.quantity) || item.quantity < 1) {
+    const qty = Math.round(Number(item.quantity));
+    if (!Number.isFinite(qty) || qty < 1) {
       throw new Error("Each item quantity must be a positive integer.");
     }
 
@@ -132,12 +133,12 @@ function calculateItemCost(items: PricingItem[]) {
 
     const total =
       item.type === "boxes"
-        ? Math.ceil(item.quantity / 10) * unitPrice
-        : item.quantity * unitPrice;
+        ? Math.ceil(qty / 10) * unitPrice
+        : qty * unitPrice;
 
     return {
       type: item.type,
-      quantity: item.quantity,
+      quantity: qty,
       unitPrice,
       total,
     };
